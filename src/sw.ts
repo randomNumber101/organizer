@@ -14,6 +14,7 @@ self.addEventListener('activate', (event) => {
 
 cleanupOutdatedCaches()
 precacheAndRoute(self.__WB_MANIFEST)
-registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html')))
+// Seitenaufrufe bekommen die App – außer Server-Adressen wie die Google-Anmeldung (/api/…)
+registerRoute(new NavigationRoute(createHandlerBoundToURL('index.html'), { denylist: [/^\/api\//] }))
 
 // Etappe 3: hier kommen die Push-Handler (push, notificationclick) dazu.
