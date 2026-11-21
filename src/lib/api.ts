@@ -1,4 +1,4 @@
-import type { List, Task, TaskPatch } from './types'
+import type { CalendarEvent, GoogleStatus, List, Task, TaskPatch } from './types'
 
 export class ApiError extends Error {
   constructor(
@@ -52,13 +52,20 @@ export const api = {
 
   createTask: (t: NewTaskBody) => request<Task>('POST', '/api/tasks', t),
   updateTask: (id: string, patch: TaskPatch) => request<Task>('PATCH', `/api/tasks/${id}`, patch),
-  setStatus: (ids: string[], status: 'open' | 'done') => request<{ tasks: Task[] }>('POST', '/api/tasks/bulk', { ids, status }),
+  setStatus: (ids: string[], status: 'open' | 'done', today: string) =>
+    request<{ tasks: Task[]; advanced: { id: string; next: string }[] }>('POST', '/api/tasks/bulk', { ids, status, today }),
   deleteTask: (id: string) => request<{ ids: string[] }>('DELETE', `/api/tasks/${id}`),
   restoreTasks: (ids: string[]) => request<{ tasks: Task[] }>('POST', '/api/tasks/restore', { ids }),
 
   createList: (l: Pick<List, 'id' | 'name' | 'color' | 'sort'>) => request<List>('POST', '/api/lists', l),
   updateList: (id: string, patch: Partial<Pick<List, 'name' | 'color' | 'sort' | 'archived'>>) => request<List>('PATCH', `/api/lists/${id}`, patch),
   deleteList: (id: string) => request<{ ok: true }>('DELETE', `/api/lists/${id}`),
+
+  googleStatus: () => request<GoogleStatus>('GET', '/api/google/status'),
+  googleEvents: (from: string, to: string) => request<{ events: CalendarEvent[] }>('GET', `/api/google/events?from=${from}&to=${to}`),
+  googleDisconnect: () => request<{ ok: true }>('POST', '/api/google/disconnect'),
+  googleCalendars: (selected: string[]) => request<{ ok: true }>('POST', '/api/google/calendars', { selected }),
+  googleRefresh: () => request<{ ok: true }>('POST', '/api/google/refresh'),
 }
 
 /**

@@ -75,4 +75,36 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX login_attempts_ip_idx ON login_attempts (ip, ts)`,
     ],
   },
+  {
+    id: 2,
+    name: 'google_calendar',
+    statements: [
+      // Aufgabe stammt aus einem Google-Termin (zum Wiedererkennen)
+      `ALTER TABLE tasks ADD COLUMN origin_event_id TEXT`,
+      // 1 = muss noch zum Google-Kalender übertragen werden
+      `ALTER TABLE tasks ADD COLUMN gcal_dirty INTEGER NOT NULL DEFAULT 0`,
+      `CREATE INDEX tasks_gcal_dirty_idx ON tasks (gcal_dirty) WHERE gcal_dirty = 1`,
+      `CREATE INDEX tasks_gcal_event_idx ON tasks (gcal_event_id)`,
+
+      `CREATE TABLE google_account (
+        id                     INTEGER PRIMARY KEY CHECK (id = 1),
+        email                  TEXT,
+        refresh_token          TEXT NOT NULL,
+        access_token           TEXT,
+        access_expires_at      INTEGER,
+        organizer_calendar_id  TEXT,
+        selected_calendars     TEXT,
+        sync_token             TEXT,
+        status                 TEXT NOT NULL DEFAULT 'ok',
+        connected_at           TEXT NOT NULL
+      )`,
+
+      `CREATE TABLE oauth_states (
+        state         TEXT PRIMARY KEY,
+        verifier      TEXT NOT NULL,
+        redirect_uri  TEXT NOT NULL,
+        created_at    INTEGER NOT NULL
+      )`,
+    ],
+  },
 ]

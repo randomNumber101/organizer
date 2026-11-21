@@ -1,1 +1,4 @@
 APP_PASSWORD=lokales-test-passwort
+# Optional für Google Kalender (lokal nur mit eigener Weiterleitungs-URI http://localhost:8787/api/google/callback):
+# GOOGLE_CLIENT_ID=
+# GOOGLE_CLIENT_SECRET=

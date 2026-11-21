@@ -1,9 +1,12 @@
 import { create } from 'zustand'
 import { ApiError, api, connectLive, setUnauthorizedHandler } from './lib/api'
 import type { SyncResult } from './lib/api'
-import type { List, Task, TaskPatch, View } from './lib/types'
-import { deviceTimeZone, localDayOf, minutesBetween, plusMinutesIso, todayStr } from './lib/dates'
+import type { BoardMode, CalendarEvent, GoogleStatus, List, Task, TaskPatch, ViewName } from './lib/types'
+import { addDaysStr, deviceTimeZone, isoFromDayMinutes, localDayOf, minutesBetween, shortDate, todayStr } from './lib/dates'
 import { descendantIds } from './lib/tree'
+import { load, save } from './lib/storage'
+import { nextOccurrence } from '../shared/recurrence'
+import { moveBlockToDate } from '../shared/tz'
 
 interface Toast {
   id: number
@@ -17,41 +20,66 @@ export interface NewTask extends TaskPatch {
 }
 
 interface State {
-  /** null = wird geprüft */
   authed: boolean | null
   loaded: boolean
   lists: Record<string, List>
   tasks: Record<string, Task>
-  view: View
-  selectedId: string | null
-  drawerOpen: boolean
-  quickAdd: { open: boolean; defaults: TaskPatch }
-  toast: Toast | null
   connected: boolean
-  collapsed: Record<string, boolean>
+
+  view: ViewName
+  boardMode: BoardMode
+  /** Tag, den Planer und Kalender zeigen */
+  focusDay: string
+  selectedId: string | null
+  quickAdd: { open: boolean; defaults: TaskPatch; hint?: string }
+  triageOpen: boolean
+  settingsOpen: boolean
+  search: string
+  toast: Toast | null
+  expanded: Record<string, boolean>
+  dragging: boolean
+
+  google: GoogleStatus | null
+  events: Record<string, CalendarEvent[]>
+  eventsLoading: boolean
 
   initAuth: () => void
   login: (password: string) => Promise<string | null>
   signOut: () => Promise<void>
   loadAll: () => Promise<void>
   syncChanges: () => Promise<void>
-  setView: (v: View) => void
+
+  setView: (v: ViewName) => void
+  setBoardMode: (m: BoardMode) => void
+  setFocusDay: (d: string) => void
   select: (id: string | null) => void
-  setDrawer: (open: boolean) => void
-  openQuickAdd: (defaults?: TaskPatch) => void
+  openQuickAdd: (defaults?: TaskPatch, hint?: string) => void
   closeQuickAdd: () => void
+  setTriage: (open: boolean) => void
+  setSettings: (open: boolean) => void
+  setSearch: (q: string) => void
   showToast: (msg: string, kind?: Toast['kind'], undo?: () => void) => void
-  toggleCollapsed: (id: string) => void
+  toggleExpanded: (id: string) => void
+  setDragging: (d: boolean) => void
 
   createTask: (input: NewTask) => Promise<Task | null>
   updateTask: (id: string, patch: TaskPatch) => Promise<void>
   toggleDone: (id: string) => Promise<void>
   deleteTask: (id: string) => Promise<void>
   moveToDay: (id: string, day: string | null) => Promise<void>
+  schedule: (id: string, day: string, startMin: number, durationMin: number) => Promise<void>
+  unschedule: (id: string) => Promise<void>
 
   createList: (name: string, color: string) => Promise<List | null>
   updateList: (id: string, patch: Partial<Pick<List, 'name' | 'color' | 'sort' | 'archived'>>) => Promise<void>
   deleteList: (id: string) => Promise<void>
+
+  loadGoogle: () => Promise<void>
+  loadEvents: (from: string, to: string, force?: boolean) => Promise<void>
+  connectGoogle: () => void
+  disconnectGoogle: () => Promise<void>
+  setGoogleCalendars: (ids: string[]) => Promise<void>
+  importEvent: (ev: CalendarEvent) => Promise<void>
 }
 
 let stopLive: (() => void) | null = null
@@ -61,8 +89,8 @@ let toastSeq = 0
 let cursor = 0
 let syncing: Promise<void> | null = null
 let syncAgain = false
-/** Aufgaben mit laufender Änderung: Sync-Ergebnisse überschreiben sie nicht (sonst flackert die Oberfläche) */
 const inflight = new Map<string, number>()
+const eventRequests = new Map<string, number>()
 
 const byId = <T extends { id: string }>(rows: T[]) => Object.fromEntries(rows.map((r) => [r.id, r])) as Record<string, T>
 const msg = (e: unknown) => (e instanceof ApiError || e instanceof Error ? e.message : String(e))
@@ -78,7 +106,6 @@ function hold(ids: string[]) {
   }
 }
 
-/** Lokal nachbilden, was der Server ableitet, damit die Oberfläche sofort stimmt */
 function normalize(t: Task): Task {
   const out = { ...t }
   if (out.start_at && out.timezone) out.due_date = localDayOf(out.start_at)
@@ -91,7 +118,6 @@ export const useStore = create<State>()((set, get) => {
   function applySync(r: SyncResult) {
     cursor = r.cursor
     if (r.full) {
-      // laufende lokale Änderungen behalten
       const keep = Object.fromEntries([...inflight.keys()].map((id) => [id, get().tasks[id]]).filter(([, t]) => t))
       set({ lists: byId(r.lists), tasks: { ...byId(r.tasks), ...keep }, loaded: true })
       return
@@ -110,6 +136,7 @@ export const useStore = create<State>()((set, get) => {
   function startSession() {
     set({ authed: true })
     void get().loadAll()
+    void get().loadGoogle()
     stopLive?.()
     stopLive = connectLive(
       () => void get().syncChanges(),
@@ -121,7 +148,7 @@ export const useStore = create<State>()((set, get) => {
     stopLive?.()
     stopLive = null
     cursor = 0
-    set({ authed: false, lists: {}, tasks: {}, loaded: false, connected: false, selectedId: null })
+    set({ authed: false, lists: {}, tasks: {}, loaded: false, connected: false, selectedId: null, google: null, events: {} })
   }
 
   return {
@@ -129,13 +156,23 @@ export const useStore = create<State>()((set, get) => {
     loaded: false,
     lists: {},
     tasks: {},
-    view: { kind: 'today' },
-    selectedId: null,
-    drawerOpen: false,
-    quickAdd: { open: false, defaults: {} },
-    toast: null,
     connected: false,
-    collapsed: {},
+
+    view: load<ViewName>('view', 'board'),
+    boardMode: load<BoardMode>('boardMode', 'lists'),
+    focusDay: todayStr(),
+    selectedId: null,
+    quickAdd: { open: false, defaults: {} },
+    triageOpen: false,
+    settingsOpen: false,
+    search: '',
+    toast: null,
+    expanded: {},
+    dragging: false,
+
+    google: null,
+    events: {},
+    eventsLoading: false,
 
     initAuth: () => {
       if (initialized) return
@@ -146,16 +183,33 @@ export const useStore = create<State>()((set, get) => {
         .then(() => startSession())
         .catch((e) => {
           endSession()
-          // offline o. Ä.: Hinweis zeigen; sobald wieder online, wird automatisch neu geprüft
           if (!(e instanceof ApiError && e.status === 401)) get().showToast(msg(e), 'error')
         })
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible' && get().authed && Date.now() - lastLoad > 30_000) void get().loadAll()
+        if (document.visibilityState !== 'visible' || !get().authed) return
+        if (get().focusDay < todayStr()) set({ focusDay: todayStr() })
+        if (Date.now() - lastLoad > 30_000) void get().loadAll()
       })
       window.addEventListener('online', () => {
         if (get().authed) void get().loadAll()
         else api.me().then(() => startSession()).catch(() => undefined)
       })
+
+      // Rückkehr von der Google-Anmeldung
+      const params = new URLSearchParams(location.search)
+      const g = params.get('google')
+      if (g) {
+        history.replaceState(null, '', location.pathname)
+        const text: Record<string, [string, 'info' | 'error']> = {
+          connected: ['Google Kalender ist verbunden.', 'info'],
+          'not-configured': ['Google ist im Worker noch nicht eingerichtet (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET).', 'error'],
+          login: ['Bitte erst anmelden und dann Google erneut verbinden.', 'error'],
+          error: [`Google-Verbindung fehlgeschlagen (${params.get('reason') ?? 'unbekannt'}).`, 'error'],
+        }
+        const [t, k] = text[g] ?? text.error
+        setTimeout(() => get().showToast(t, k), 400)
+        if (g === 'connected') set({ settingsOpen: true })
+      }
     },
 
     login: async (password) => {
@@ -176,10 +230,8 @@ export const useStore = create<State>()((set, get) => {
     loadAll: async () => {
       lastLoad = Date.now()
       try {
-        // Übertrag: unerledigte Tagesaufgaben aus der Vergangenheit auf heute
         const roll = await api.rollover(todayStr())
-        const r = await api.sync(0)
-        applySync(r)
+        applySync(await api.sync(0))
         if (roll.moved > 0) get().showToast(`${roll.moved} unerledigte ${roll.moved === 1 ? 'Aufgabe' : 'Aufgaben'} auf heute übertragen`)
       } catch (e) {
         if (!(e instanceof ApiError && e.status === 401)) get().showToast(`Laden fehlgeschlagen: ${msg(e)}`, 'error')
@@ -207,19 +259,30 @@ export const useStore = create<State>()((set, get) => {
       return syncing
     },
 
-    setView: (view) => set({ view, drawerOpen: false, selectedId: null }),
+    setView: (view) => {
+      save('view', view)
+      set({ view, selectedId: null })
+    },
+    setBoardMode: (boardMode) => {
+      save('boardMode', boardMode)
+      set({ boardMode })
+    },
+    setFocusDay: (focusDay) => set({ focusDay }),
     select: (selectedId) => set({ selectedId }),
-    setDrawer: (drawerOpen) => set({ drawerOpen }),
-    openQuickAdd: (defaults = {}) => set({ quickAdd: { open: true, defaults } }),
+    openQuickAdd: (defaults = {}, hint) => set({ quickAdd: { open: true, defaults, hint } }),
     closeQuickAdd: () => set({ quickAdd: { open: false, defaults: {} } }),
-    toggleCollapsed: (id) => set((s) => ({ collapsed: { ...s.collapsed, [id]: !s.collapsed[id] } })),
+    setTriage: (triageOpen) => set({ triageOpen }),
+    setSettings: (settingsOpen) => set({ settingsOpen }),
+    setSearch: (search) => set({ search }),
+    toggleExpanded: (id) => set((s) => ({ expanded: { ...s.expanded, [id]: !s.expanded[id] } })),
+    setDragging: (dragging) => set({ dragging }),
 
     showToast: (text, kind = 'info', undo) => {
       const id = ++toastSeq
       set({ toast: { id, msg: text, kind, undo } })
       setTimeout(() => {
         if (get().toast?.id === id) set({ toast: null })
-      }, kind === 'error' ? 6000 : 4500)
+      }, kind === 'error' ? 6500 : undo ? 5500 : 3500)
     },
 
     createTask: async (input) => {
@@ -243,15 +306,16 @@ export const useStore = create<State>()((set, get) => {
         sort: Date.now(),
         gcal_event_id: null,
         gcal_etag: null,
+        origin_event_id: null,
         created_at: now,
         updated_at: now,
         ...input,
       })
       set((s) => ({ tasks: { ...s.tasks, [task.id]: task } }))
       const release = hold([task.id])
-      const { id, title, list_id, parent_id, notes, status, priority, horizon, tags, due_date, start_at, end_at, timezone, rrule, sort } = task
+      const { id, title, list_id, parent_id, notes, status, priority, horizon, tags, due_date, start_at, end_at, timezone, rrule, sort, origin_event_id } = task
       try {
-        const saved = await api.createTask({ id, title, list_id, parent_id, notes, status, priority, horizon, tags, due_date, start_at, end_at, timezone, rrule, sort })
+        const saved = await api.createTask({ id, title, list_id, parent_id, notes, status, priority, horizon, tags, due_date, start_at, end_at, timezone, rrule, sort, origin_event_id })
         set((s) => ({ tasks: { ...s.tasks, [saved.id]: saved } }))
         return saved
       } catch (e) {
@@ -272,6 +336,7 @@ export const useStore = create<State>()((set, get) => {
       if (!prev) return
       const fullPatch: TaskPatch = { ...patch }
       if (patch.start_at && !prev.timezone && !patch.timezone) fullPatch.timezone = deviceTimeZone()
+      if (patch.rrule && !prev.due_date && !patch.due_date) fullPatch.due_date = todayStr()
       set((s) => ({ tasks: { ...s.tasks, [id]: normalize({ ...prev, ...fullPatch }) } }))
       const release = hold([id])
       try {
@@ -293,18 +358,33 @@ export const useStore = create<State>()((set, get) => {
         await get().updateTask(id, { status: 'open' })
         return
       }
-      // Erledigen schließt offene Unteraufgaben mit ab
-      const ids = [id, ...descendantIds(tasks, id).filter((d) => tasks[d]?.status === 'open')]
-      const prev = ids.map((i) => tasks[i])
+      const today = todayStr()
+      const desc = descendantIds(tasks, id)
+      const ids = [id, ...desc.filter((d) => tasks[d]?.status === 'open')]
+      const prev = [task, ...desc.map((d) => tasks[d]).filter(Boolean)]
       const now = new Date().toISOString()
+
+      // Optimistisch: wiederkehrende Aufgaben rücken vor, andere werden erledigt
       set((s) => {
         const next = { ...s.tasks }
-        for (const i of ids) next[i] = { ...next[i], status: 'done', completed_at: now }
+        if (task.rrule) {
+          const nd = nextOccurrence(task.rrule, task.due_date ?? today, today)
+          if (nd) {
+            let moved: Partial<Task> = { due_date: nd }
+            if (task.start_at && task.end_at && task.timezone) moved = { ...moveBlockToDate(task.start_at, task.end_at, task.timezone, nd), due_date: nd }
+            next[id] = { ...task, ...moved, rollover_count: 0 }
+          }
+          for (const d of desc) if (next[d]) next[d] = { ...next[d], status: 'open', completed_at: null }
+        } else {
+          for (const i of ids) next[i] = { ...next[i], status: 'done', completed_at: now }
+        }
         return { tasks: next }
       })
-      const release = hold(ids)
+      const release = hold([id, ...desc])
+      let advanced: { id: string; next: string }[] = []
       try {
-        const r = await api.setStatus(ids, 'done')
+        const r = await api.setStatus(ids, 'done', today)
+        advanced = r.advanced
         set((s) => ({ tasks: { ...s.tasks, ...byId(r.tasks) } }))
       } catch (e) {
         set((s) => ({ tasks: { ...s.tasks, ...byId(prev) } }))
@@ -313,15 +393,20 @@ export const useStore = create<State>()((set, get) => {
       } finally {
         release()
       }
-      get().showToast(`„${task.title}“ erledigt`, 'info', () => {
+      const adv = advanced.find((a) => a.id === id)
+      const restore = () => {
         set((s) => ({ tasks: { ...s.tasks, ...byId(prev) } }))
-        const rel = hold(ids)
-        api
-          .setStatus(ids, 'open')
-          .then((r) => set((s) => ({ tasks: { ...s.tasks, ...byId(r.tasks) } })))
-          .catch((e) => get().showToast(`Rückgängig fehlgeschlagen: ${msg(e)}`, 'error'))
-          .finally(rel)
-      })
+        const rel = hold(prev.map((p) => p.id))
+        const p = adv
+          ? api.updateTask(id, { due_date: task.due_date, start_at: task.start_at, end_at: task.end_at, timezone: task.timezone }).then(async (t) => {
+              const doneKids = prev.filter((x) => x.id !== id && x.status === 'done').map((x) => x.id)
+              const r = doneKids.length ? await api.setStatus(doneKids, 'done', today) : { tasks: [] }
+              set((s) => ({ tasks: { ...s.tasks, [t.id]: t, ...byId(r.tasks) } }))
+            })
+          : api.setStatus(ids, 'open', today).then((r) => set((s) => ({ tasks: { ...s.tasks, ...byId(r.tasks) } })))
+        p.catch((e) => get().showToast(`Rückgängig fehlgeschlagen: ${msg(e)}`, 'error')).finally(rel)
+      }
+      get().showToast(adv ? `„${task.title}“ erledigt · nächstes Mal ${shortDate(adv.next)}` : `„${task.title}“ erledigt`, 'info', restore)
     },
 
     deleteTask: async (id) => {
@@ -365,19 +450,22 @@ export const useStore = create<State>()((set, get) => {
         return
       }
       if (t.start_at && t.end_at) {
-        // gleiche Uhrzeit, neuer Tag
-        const start = new Date(t.start_at)
-        const [y, m, d] = day.split('-').map(Number)
-        start.setFullYear(y, m - 1, d)
-        const startIso = start.toISOString()
-        await get().updateTask(id, {
-          start_at: startIso,
-          end_at: plusMinutesIso(startIso, minutesBetween(t.start_at, t.end_at)),
-          timezone: deviceTimeZone(),
-        })
+        await get().updateTask(id, { ...moveBlockToDate(t.start_at, t.end_at, t.timezone ?? deviceTimeZone(), day), timezone: t.timezone ?? deviceTimeZone() })
         return
       }
       await get().updateTask(id, { due_date: day })
+    },
+
+    schedule: async (id, day, startMin, durationMin) => {
+      const start = isoFromDayMinutes(day, startMin)
+      const end = isoFromDayMinutes(day, startMin + durationMin)
+      await get().updateTask(id, { start_at: start, end_at: end, timezone: deviceTimeZone() })
+    },
+
+    unschedule: async (id) => {
+      const t = get().tasks[id]
+      if (!t) return
+      await get().updateTask(id, { start_at: null, end_at: null, timezone: null, due_date: t.due_date })
     },
 
     createList: async (name, color) => {
@@ -408,18 +496,108 @@ export const useStore = create<State>()((set, get) => {
     deleteList: async (id) => {
       const prevLists = get().lists
       const prevTasks = get().tasks
+      const name = prevLists[id]?.name
       set((s) => {
         const lists = { ...s.lists }
         delete lists[id]
         const tasks = Object.fromEntries(Object.entries(s.tasks).map(([k, t]) => [k, t.list_id === id ? { ...t, list_id: null } : t]))
-        return { lists, tasks, view: s.view.kind === 'list' && s.view.listId === id ? { kind: 'today' } : s.view }
+        return { lists, tasks }
       })
       try {
         await api.deleteList(id)
+        get().showToast(`Liste „${name}“ gelöscht – ihre Aufgaben liegen jetzt in „Unsortiert“`)
       } catch (e) {
         set({ lists: prevLists, tasks: prevTasks })
         get().showToast(`Löschen fehlgeschlagen: ${msg(e)}`, 'error')
       }
     },
+
+    loadGoogle: async () => {
+      try {
+        set({ google: await api.googleStatus() })
+      } catch (e) {
+        console.warn('google status', e)
+        set({ google: { configured: false, connected: false } })
+      }
+    },
+
+    loadEvents: async (from, to, force = false) => {
+      const g = get().google
+      if (!g?.connected || g.status !== 'ok') return
+      const key = `${from}|${to}`
+      const last = eventRequests.get(key) ?? 0
+      if (!force && Date.now() - last < 60_000) return
+      eventRequests.set(key, Date.now())
+      set({ eventsLoading: true })
+      try {
+        const r = await api.googleEvents(from, to)
+        set((s) => ({ events: { ...s.events, [key]: r.events } }))
+      } catch (e) {
+        eventRequests.delete(key)
+        if (e instanceof ApiError && e.status === 409) void get().loadGoogle()
+      } finally {
+        set({ eventsLoading: false })
+      }
+    },
+
+    connectGoogle: () => {
+      location.href = '/api/google/connect'
+    },
+
+    disconnectGoogle: async () => {
+      try {
+        await api.googleDisconnect()
+        set({ events: {} })
+        eventRequests.clear()
+        await get().loadGoogle()
+        get().showToast('Google Kalender getrennt')
+      } catch (e) {
+        get().showToast(msg(e), 'error')
+      }
+    },
+
+    setGoogleCalendars: async (ids) => {
+      const g = get().google
+      if (g?.calendars) set({ google: { ...g, calendars: g.calendars.map((c) => ({ ...c, selected: ids.includes(c.id) })) } })
+      try {
+        await api.googleCalendars(ids)
+        eventRequests.clear()
+        set({ events: {} })
+      } catch (e) {
+        get().showToast(msg(e), 'error')
+        void get().loadGoogle()
+      }
+    },
+
+    importEvent: async (ev) => {
+      const exists = Object.values(get().tasks).find((t) => t.origin_event_id === ev.id)
+      if (exists) {
+        get().showToast('Diesen Termin hast du schon als Aufgabe')
+        set({ selectedId: exists.id })
+        return
+      }
+      const patch: NewTask = { title: ev.title, origin_event_id: ev.id, notes: ev.location ? `Ort: ${ev.location}` : null }
+      if (ev.allDay) patch.due_date = ev.start
+      else {
+        patch.start_at = ev.start
+        patch.end_at = minutesBetween(ev.start, ev.end) > 0 ? ev.end : new Date(Date.parse(ev.start) + 3_600_000).toISOString()
+        patch.timezone = deviceTimeZone()
+      }
+      const t = await get().createTask(patch)
+      if (t) get().showToast(`„${t.title}“ als Aufgabe übernommen`)
+    },
   }
 })
+
+/** Termine für einen Zeitraum (inkl. aller geladenen Bereiche, die ihn überlappen) */
+export function eventsFor(events: Record<string, CalendarEvent[]>, from: string, to: string): CalendarEvent[] {
+  const seen = new Map<string, CalendarEvent>()
+  for (const [key, list] of Object.entries(events)) {
+    const [f, t] = key.split('|')
+    if (t < from || f > to) continue
+    for (const e of list) seen.set(`${e.calendarId}|${e.id}`, e)
+  }
+  return [...seen.values()]
+}
+
+export const nextDays = (n: number) => addDaysStr(todayStr(), n)

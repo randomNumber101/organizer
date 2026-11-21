@@ -1,3 +1,5 @@
+import { isValidRRule } from '../shared/recurrence'
+
 export class HttpError extends Error {
   constructor(
     public status: number,
@@ -30,6 +32,8 @@ export type TaskRow = {
   sort: number
   gcal_event_id: string | null
   gcal_etag: string | null
+  origin_event_id: string | null
+  gcal_dirty: number
   created_at: string
   updated_at: string
   deleted_at: string | null
@@ -49,7 +53,7 @@ export type ListRow = {
 }
 
 export function taskOut(r: TaskRow) {
-  const { deleted_at: _d, seq: _s, tags, ...rest } = r
+  const { deleted_at: _d, seq: _s, gcal_dirty: _g, tags, ...rest } = r
   let parsed: string[] = []
   try {
     parsed = JSON.parse(tags)
@@ -109,6 +113,7 @@ export type TaskInput = Partial<{
   timezone: string | null
   rrule: string | null
   sort: number
+  origin_event_id: string | null
 }>
 
 const bad = (msg: string): never => {
@@ -140,7 +145,8 @@ export function cleanTaskInput(body: unknown): TaskInput {
   if ('start_at' in b) out.start_at = b.start_at === null ? null : isIso(b.start_at) ? new Date(b.start_at).toISOString() : bad('Ungültige Startzeit')
   if ('end_at' in b) out.end_at = b.end_at === null ? null : isIso(b.end_at) ? new Date(b.end_at).toISOString() : bad('Ungültige Endzeit')
   if ('timezone' in b) out.timezone = b.timezone === null ? null : isTimeZone(b.timezone) ? b.timezone : bad('Ungültige Zeitzone')
-  if ('rrule' in b) out.rrule = b.rrule === null ? null : typeof b.rrule === 'string' && b.rrule.length <= 500 ? b.rrule : bad('Ungültige Wiederholung')
+  if ('rrule' in b) out.rrule = b.rrule === null || b.rrule === '' ? null : typeof b.rrule === 'string' && b.rrule.length <= 200 && isValidRRule(b.rrule) ? b.rrule.toUpperCase() : bad('Ungültige Wiederholung')
+  if ('origin_event_id' in b) out.origin_event_id = b.origin_event_id === null ? null : typeof b.origin_event_id === 'string' && b.origin_event_id.length <= 1100 ? b.origin_event_id : bad('Ungültiger Termin-Verweis')
   if ('sort' in b) out.sort = typeof b.sort === 'number' && Number.isFinite(b.sort) ? b.sort : bad('Ungültige Sortierung')
   return out
 }

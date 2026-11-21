@@ -1,98 +1,114 @@
 import { useMemo, useState } from 'react'
-import type { FormEvent } from 'react'
+import { AnimatePresence, motion } from 'motion/react'
+import { CalendarClock, Plus } from 'lucide-react'
 import { useStore } from '../store'
-import { parseQuickAdd } from '../lib/quickadd'
-import { dayLabel, deviceTimeZone, localDateTimeToIso, plusMinutesIso, todayStr } from '../lib/dates'
-import type { TaskPatch } from '../lib/types'
-import { HORIZON_LABEL, PRIORITY_LABEL } from '../lib/types'
+import { composeTask } from '../lib/compose'
+import { dayLabel, hhmm, minutesOfDay, todayStr } from '../lib/dates'
+import { HORIZON_LABEL, LIST_COLORS, PRIORITY_LABEL } from '../lib/types'
+import { useIsMobile } from '../hooks/useMedia'
 
+/** Schnelleingabe (Taste N oder +). Versteht „morgen 14 Uhr !1 #uni @Job“. */
 export default function QuickAdd() {
-  const { quickAdd, closeQuickAdd, createTask, lists, createList } = useStore()
+  const qa = useStore((s) => s.quickAdd)
+  const close = useStore((s) => s.closeQuickAdd)
+  const isMobile = useIsMobile()
+  return (
+    <AnimatePresence>
+      {qa.open && (
+        <motion.div className="qa-wrap" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(e) => e.target === e.currentTarget && close()}>
+          <motion.div
+            className="qa"
+            initial={isMobile ? { y: '100%' } : { y: -10, opacity: 0, scale: 0.98 }}
+            animate={isMobile ? { y: 0 } : { y: 0, opacity: 1, scale: 1 }}
+            exit={isMobile ? { y: '100%' } : { y: -10, opacity: 0, scale: 0.98 }}
+            transition={{ type: 'spring', stiffness: 500, damping: 40 }}
+          >
+            <QuickAddForm />
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}
+
+function QuickAddForm() {
+  const { defaults, hint } = useStore((s) => s.quickAdd)
+  const lists = useStore((s) => s.lists)
+  const close = useStore((s) => s.closeQuickAdd)
+  const createTask = useStore((s) => s.createTask)
+  const createList = useStore((s) => s.createList)
   const [text, setText] = useState('')
+  const [count, setCount] = useState(0)
+  const c = useMemo(() => composeTask(text, defaults, lists), [text, defaults, lists])
   const today = todayStr()
-  const parsed = useMemo(() => parseQuickAdd(text, today), [text, today])
-  const d = quickAdd.defaults
+  const p = c.patch
 
-  const matchedList = parsed.listName
-    ? Object.values(lists).find((l) => l.name.toLowerCase().startsWith(parsed.listName!.toLowerCase()))
-    : undefined
-
-  const dueDate = parsed.dueDate ?? d.due_date ?? null
-  const listId = matchedList?.id ?? d.list_id ?? null
-  const tags = [...new Set([...(d.tags ?? []), ...parsed.tags])]
-  const priority = parsed.priority ?? d.priority ?? 4
-
-  async function submit(e: FormEvent) {
-    e.preventDefault()
-    if (!parsed.title) return
-    let list_id = listId
-    if (parsed.listName && !matchedList) {
-      const l = await createList(parsed.listName, '#5f6b7a')
-      list_id = l?.id ?? null
-    }
-    const patch: TaskPatch & { title: string } = {
-      ...d,
-      title: parsed.title,
-      priority,
-      tags,
-      list_id,
-      due_date: dueDate,
-    }
-    if (parsed.time && dueDate) {
-      const start = localDateTimeToIso(dueDate, parsed.time)
-      patch.start_at = start
-      patch.end_at = plusMinutesIso(start, parsed.durationMin ?? 60)
-      patch.timezone = deviceTimeZone()
-    }
-    void createTask(patch)
+  const submit = async () => {
+    if (!p.title) return
+    let list_id = p.list_id
+    if (c.newListName) list_id = (await createList(c.newListName, LIST_COLORS[Object.keys(lists).length % LIST_COLORS.length]))?.id ?? null
+    void createTask({ ...p, list_id })
     setText('')
+    setCount((n) => n + 1)
   }
 
   return (
-    <div className="quickadd-wrap" onClick={(e) => e.target === e.currentTarget && closeQuickAdd()}>
-      <form className="quickadd" onSubmit={submit}>
+    <>
+      <div className="qa-input">
+        <Plus size={20} style={{ color: 'var(--accent)' }} />
         <input
           autoFocus
-          enterKeyHint="done"
-          placeholder="Neue Aufgabe …"
           value={text}
+          placeholder={hint ? `Neue Aufgabe · ${hint}` : 'Neue Aufgabe …'}
+          enterKeyHint="done"
           onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void submit()
+            if (e.key === 'Escape') close()
+          }}
         />
-        <div className="qa-preview">
-          {dueDate && <span className="chip">{dayLabel(dueDate, today)}</span>}
-          {parsed.time && (
-            <span className="chip time">
-              {parsed.time} · {parsed.durationMin} Min.
-            </span>
+      </div>
+      <div className="qa-chips">
+        {p.due_date && <span className="chip today">{dayLabel(p.due_date, today)}</span>}
+        {p.start_at && p.end_at && (
+          <span className="chip time">
+            <CalendarClock />
+            {hhmm(minutesOfDay(p.start_at))}–{hhmm(minutesOfDay(p.end_at))}
+          </span>
+        )}
+        {p.priority && p.priority < 4 && <span className="chip">{PRIORITY_LABEL[p.priority]}</span>}
+        {p.list_id && lists[p.list_id] && (
+          <span className="chip">
+            <span className="dot" style={{ background: lists[p.list_id].color }} />
+            {lists[p.list_id].name}
+          </span>
+        )}
+        {c.newListName && <span className="chip">neue Liste „{c.newListName}“</span>}
+        {!p.due_date && p.horizon && p.horizon !== 'backlog' && <span className="chip">{HORIZON_LABEL[p.horizon]}</span>}
+        {!p.list_id && !c.newListName && <span className="chip">Unsortiert</span>}
+        {(p.tags ?? []).map((t) => (
+          <span key={t} className="chip tag">
+            #{t}
+          </span>
+        ))}
+      </div>
+      <div className="qa-foot">
+        <span className="muted small">
+          {count > 0 ? `${count} angelegt – einfach weitertippen` : (
+            <>
+              <kbd>morgen</kbd> <kbd>14 Uhr</kbd> <kbd>!1</kbd> <kbd>#tag</kbd> <kbd>@liste</kbd>
+            </>
           )}
-          {priority !== 4 && <span className={`chip prio p${priority}`}>{PRIORITY_LABEL[priority]}</span>}
-          {listId && lists[listId] && (
-            <span className="chip list">
-              <span className="dot" style={{ background: lists[listId].color }} />
-              {lists[listId].name}
-            </span>
-          )}
-          {parsed.listName && !matchedList && <span className="chip list">neue Liste: {parsed.listName}</span>}
-          {!dueDate && d.horizon && <span className="chip">{HORIZON_LABEL[d.horizon]}</span>}
-          {d.parent_id && <span className="chip">Unteraufgabe</span>}
-          {tags.map((t) => (
-            <span key={t} className="chip tag">
-              #{t}
-            </span>
-          ))}
+        </span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button className="btn sm ghost" onClick={close}>
+            Fertig
+          </button>
+          <button className="btn sm primary" disabled={!p.title} onClick={() => void submit()}>
+            Hinzufügen
+          </button>
         </div>
-        <div className="qa-foot">
-          <span className="muted small">Tipp: „Mails morgen 14 Uhr !1 #uni @Job“</span>
-          <div className="btn-row">
-            <button type="button" className="btn small ghost" onClick={closeQuickAdd}>
-              Fertig
-            </button>
-            <button className="btn small primary" disabled={!parsed.title}>
-              Hinzufügen
-            </button>
-          </div>
-        </div>
-      </form>
-    </div>
+      </div>
+    </>
   )
 }

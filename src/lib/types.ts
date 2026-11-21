@@ -32,19 +32,45 @@ export interface Task {
   sort: number
   gcal_event_id: string | null
   gcal_etag: string | null
+  origin_event_id: string | null
   created_at: string
   updated_at: string
 }
 
 export type TaskPatch = Partial<Omit<Task, 'id' | 'created_at' | 'updated_at' | 'rollover_count' | 'completed_at' | 'gcal_event_id' | 'gcal_etag'>>
 
-export type View =
-  | { kind: 'today' }
-  | { kind: 'upcoming' }
-  | { kind: 'horizon'; horizon: Horizon }
-  | { kind: 'list'; listId: string }
-  | { kind: 'tag'; tag: string }
-  | { kind: 'done' }
+export type ViewName = 'board' | 'today' | 'calendar'
+export type BoardMode = 'lists' | 'week'
+
+export interface CalendarEvent {
+  id: string
+  calendarId: string
+  calendarName: string
+  title: string
+  /** ISO-Zeitpunkt oder bei ganztägigen Terminen YYYY-MM-DD */
+  start: string
+  end: string
+  allDay: boolean
+  color: string
+  location: string | null
+  link: string | null
+}
+
+export interface GoogleCalendarInfo {
+  id: string
+  name: string
+  color: string
+  primary: boolean
+  selected: boolean
+}
+
+export interface GoogleStatus {
+  configured: boolean
+  connected: boolean
+  status?: 'ok' | 'reauth'
+  email?: string | null
+  calendars?: GoogleCalendarInfo[]
+}
 
 export const HORIZON_LABEL: Record<Horizon, string> = {
   short: 'Kurzfristig',
@@ -59,4 +85,4 @@ export const PRIORITY_LABEL: Record<Priority, string> = {
   4: 'Keine',
 }
 
-export const LIST_COLORS = ['#2f5d50', '#3d6fb6', '#b5523b', '#c28a1a', '#7a4fa3', '#2b8a8a', '#a3456e', '#5f6b7a']
+export const LIST_COLORS = ['#3f6f5f', '#4a6fa5', '#b6583e', '#b88a2a', '#7b5ea7', '#3b8a8c', '#a24d6f', '#6b7280']
