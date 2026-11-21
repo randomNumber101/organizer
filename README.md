@@ -66,3 +66,8 @@ Für schnelles UI-Arbeiten: `npm run dev:api` (Worker auf :8787) und parallel `n
 3. ✅ Google Kalender in beide Richtungen
 4. Push-Erinnerungen direkt aus der App (bis dahin: Google-Kalender-Erinnerungen)
 5. Import aus Google Tasks, Offline-Warteschlange
+
+## Versionen
+
+- **0.2** (21.11.2026): Board mit Drag & Drop, Stapel „Unsortiert“, Woche, Heute-Planer, Kalender, Wiederholungen, Google Kalender
+- **0.1** (21.11.2026): Grundgerüst
