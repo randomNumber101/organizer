@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "organizer",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-11-15",
+  "observability": { "enabled": true },
+
+  // Statische Dateien der App (vite build). Nur /api/* geht durch den Worker.
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+
+  // Daten, Anmeldung und Live-Sync stecken in einem Durable Object mit eigener SQLite-Datenbank.
+  // Das Schema legt es beim Start selbst an (worker/migrations.ts) – keine extra Datenbank nötig.
+  "durable_objects": {
+    "bindings": [{ "name": "STORE", "class_name": "OrganizerStore" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OrganizerStore"] }],
+
+  // Secret APP_PASSWORD wird im Cloudflare-Dashboard gesetzt, nicht hier.
+  "keep_vars": true
+}

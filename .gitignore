@@ -1,0 +1,14 @@
+# Zugangsdaten – niemals committen
+tokens/
+.env
+.env.*
+
+# Build
+node_modules/
+dist/
+dev-dist/
+*.log
+.DS_Store
+.wrangler/
+.dev.vars
+Claude outputs/
