@@ -3766,3 +3766,184 @@ mark.tk {
   align-items: center;
   gap: 6px;
 }
+
+/* 0.6 – Tag planen: Gruppen, Unteraufgaben, Reihenfolge */
+.r-sub svg {
+  flex: none;
+}
+.r-crumb {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.r-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 6px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--bg);
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+.r-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.r-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font-size: 14px;
+  color: var(--text);
+}
+.r-search input:focus {
+  outline: none;
+}
+.r-group {
+  margin-bottom: 16px;
+}
+.r-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 9px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--bg-2);
+}
+.r-group-toggle span {
+  color: var(--text-2);
+}
+.r-group-toggle svg {
+  transition: transform 0.2s var(--ease);
+  transform: rotate(-90deg);
+}
+.r-group-toggle.open svg {
+  transform: none;
+}
+.r-group-toggle:hover {
+  color: var(--text);
+}
+.r-listgroup {
+  margin-top: 10px;
+}
+.r-listname {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--text-2);
+  margin: 0 0 6px 4px;
+}
+.r-tree {
+  display: flex;
+  flex-direction: column;
+}
+.r-row.nested {
+  border-style: dashed;
+}
+.r-row .r-kid-icon {
+  flex: none;
+}
+.r-kids {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 3px 0 2px 26px;
+  padding-left: 8px;
+  border-left: 2px solid var(--line);
+}
+.r-kid {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  font-size: 13px;
+  color: var(--text-2);
+  padding-right: 4px;
+  border-radius: 6px;
+}
+.r-kid.planned .r-kid-title {
+  color: var(--accent);
+}
+.r-kid-icon {
+  color: var(--muted);
+  flex: none;
+}
+.r-kid-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.r-kid-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.r-kid-meta.on {
+  color: var(--accent);
+  font-weight: 650;
+}
+.r-kid-add {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  flex: none;
+}
+.r-kid-add:hover {
+  background: var(--accent-soft);
+}
+.r-kid-more {
+  align-self: flex-start;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 2px 0 2px 19px;
+}
+.r-grip {
+  width: 26px;
+  height: 30px;
+  margin-left: -6px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  cursor: grab;
+  touch-action: none;
+  border-radius: 7px;
+  flex: none;
+}
+.r-grip:hover {
+  background: var(--bg-2);
+  color: var(--text);
+}
+.r-row.dragging {
+  box-shadow: var(--shadow-lift);
+  border-color: var(--accent);
+  cursor: grabbing;
+}
+.r-row.dragging .r-grip {
+  cursor: grabbing;
+}
+@media (max-width: 820px) {
+  .r-row.time-row .r-durs {
+    padding-left: 30px;
+  }
+}

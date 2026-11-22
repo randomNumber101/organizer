@@ -16,9 +16,11 @@ interface MetaProps {
   task: Task
   showDate?: boolean
   showList?: boolean
+  /** Fortschritt der Unteraufgaben zeigen (aus, wenn sie ohnehin darunter stehen) */
+  showSubs?: boolean
 }
 
-export function TaskMeta({ task, showDate = true, showList = true }: MetaProps) {
+export function TaskMeta({ task, showDate = true, showList = true, showSubs = true }: MetaProps) {
   const tasks = useStore((s) => s.tasks)
   const list = useStore((s) => (task.list_id ? s.lists[task.list_id] : undefined))
   const expanded = useStore((s) => s.expanded[task.id] ?? s.showSubtasks)
@@ -58,7 +60,7 @@ export function TaskMeta({ task, showDate = true, showList = true }: MetaProps) 
           <Repeat />
         </span>
       )}
-      {progress.total > 0 && (
+      {showSubs && progress.total > 0 && (
         <button
           type="button"
           className={`chip sub-expander ${expanded ? 'open' : ''}`}

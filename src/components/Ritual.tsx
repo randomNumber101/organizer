@@ -1,15 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowLeft, ArrowRight, CalendarClock, Check as CheckIcon, Moon, Plus, Sparkles, Sun, Wand2, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, CalendarClock, Check as CheckIcon, Moon, Plus, Sparkles, Sun, X } from 'lucide-react'
 import { useStore, eventsFor, type RitualKind } from '../store'
 import type { Task } from '../lib/types'
-import { addDaysStr, durationLabel, hhmm, localDayOf, longDayLabel, minutesOfDay, timeLabel, todayStr } from '../lib/dates'
-import { autoPlan, busyTimes } from '../lib/autoplan'
-import { isBlocked } from '../lib/blocking'
+import { addDaysStr, localDayOf, longDayLabel, minutesOfDay, timeLabel, todayStr } from '../lib/dates'
 import { haptic } from '../lib/haptics'
 import { TaskMeta } from './TaskCard'
 import CheckBox from './Check'
 import SmartField from './SmartField'
+import { PickStep, TimeStep, treeOrder } from './RitualPlan'
 import { composeTask } from '../lib/compose'
 import { LIST_COLORS } from '../lib/types'
 
@@ -93,8 +92,8 @@ function Flow({ kind }: { kind: RitualKind }) {
 
   const titles: Record<Step, [string, string]> = {
     leftover: ['Was ist liegen geblieben?', 'Entscheide kurz für jede Aufgabe: heute, morgen, später – oder schon erledigt.'],
-    pick: ['Was steht heute an?', 'Nimm dir lieber weniger vor. Vorschläge kommen aus Fristen und wichtigen Aufgaben.'],
-    time: ['Wann machst du was?', 'Schätze grob die Dauer – dann verteile ich alles in deine freien Lücken.'],
+    pick: ['Was steht heute an?', 'Nimm dir lieber weniger vor. Antippen holt eine Aufgabe auf heute – zuerst das Wichtige, dann Kleinkram.'],
+    time: ['Wann machst du was?', 'Bring die Aufgaben in deine Reihenfolge und schätze die Dauer – sie werden nacheinander in die freien Lücken gelegt.'],
     summary: ['Dein Tag steht', ''],
     achieved: ['Das hast du heute geschafft', ''],
     open: ['Was ist noch offen?', 'Schieb es bewusst weiter, statt es einfach liegen zu lassen.'],
@@ -132,7 +131,11 @@ function Flow({ kind }: { kind: RitualKind }) {
             <h2 className="ritual-title">{titles[step][0]}</h2>
             {titles[step][1] && <p className="ritual-lead">{titles[step][1]}</p>}
             {step === 'leftover' && <LeftoverStep today={today} />}
-            {step === 'pick' && <PickStep today={today} />}
+            {step === 'pick' && (
+              <PickStep today={today}>
+                <RitualQuickAdd day={today} />
+              </PickStep>
+            )}
             {step === 'time' && <TimeStep today={today} />}
             {step === 'summary' && <SummaryStep today={today} />}
             {step === 'achieved' && <AchievedStep today={today} />}
@@ -167,7 +170,7 @@ function Flow({ kind }: { kind: RitualKind }) {
 // ---------------------------------------------------------------------------
 type Decision = 'today' | 'tomorrow' | 'later' | 'done' | null
 
-function DecideRow({ task, options, today }: { task: Task; options: Exclude<Decision, null>[]; today: string }) {
+function DecideRow({ task, options, today, depth = 0, crumb = [] }: { task: Task; options: Exclude<Decision, null>[]; today: string; depth?: number; crumb?: string[] }) {
   const moveToDay = useStore((s) => s.moveToDay)
   const toggleDone = useStore((s) => s.toggleDone)
   const select = useStore((s) => s.select)
@@ -185,10 +188,11 @@ function DecideRow({ task, options, today }: { task: Task; options: Exclude<Deci
     setPicked(d)
   }
   return (
-    <motion.div layout="position" className={`r-row ${picked ? 'decided' : ''} ${picked === 'done' ? 'is-done' : ''}`}>
+    <motion.div layout="position" className={`r-row ${picked ? 'decided' : ''} ${picked === 'done' ? 'is-done' : ''} ${depth ? 'nested' : ''}`} style={depth ? { marginLeft: Math.min(depth, 3) * 22 } : undefined}>
       <button className="r-row-main" onClick={() => select(task.id)}>
+        {crumb.length > 0 && <span className="r-crumb">{crumb.join(' › ')} ›</span>}
         <span className="r-row-title">{task.title}</span>
-        <TaskMeta task={task} />
+        <TaskMeta task={task} showSubs={false} />
       </button>
       <div className="r-choices" role="group" aria-label={`Was passiert mit „${task.title}“?`}>
         {options.map((o) => (
@@ -210,109 +214,14 @@ function LeftoverStep({ today }: { today: string }) {
   const rows = ids.map((id) => tasks[id]).filter(Boolean)
   return (
     <div className="r-list">
-      {rows.map((t) => (
-        <DecideRow key={t.id} task={t} today={today} options={['done', 'today', 'tomorrow', 'later']} />
+      {treeOrder(tasks, rows).map((r) => (
+        <DecideRow key={r.task.id} task={r.task} depth={r.depth} crumb={r.crumb} today={today} options={['done', 'today', 'tomorrow', 'later']} />
       ))}
       {rows.length > 1 && (
         <button className="add-link" onClick={() => rows.forEach((t) => t.status === 'open' && t.due_date !== today && moveToDay(t.id, today))}>
           Alles auf heute
         </button>
       )}
-    </div>
-  )
-}
-
-function PickStep({ today }: { today: string }) {
-  const tasks = useStore((s) => s.tasks)
-  const moveToDay = useStore((s) => s.moveToDay)
-  const events = useStore((s) => s.events)
-  const todays = Object.values(tasks)
-    .filter((t) => t.status === 'open' && t.due_date === today)
-    .sort((a, b) => (a.start_at ?? '~').localeCompare(b.start_at ?? '~') || byPrio(a, b))
-  const [suggestIds] = useState(() => {
-    const week = addDaysStr(today, 7)
-    return Object.values(tasks)
-      .filter((t) => t.status === 'open' && t.due_date !== today && !isBlocked(tasks, t))
-      .filter((t) => (t.deadline && t.deadline.slice(0, 10) <= week) || (!t.due_date && (t.priority === 1 || t.horizon === 'short')))
-      .sort((a, b) => (a.deadline ?? '9').localeCompare(b.deadline ?? '9') || byPrio(a, b))
-      .slice(0, 12)
-      .map((t) => t.id)
-  })
-  const todayEvents = eventsFor(events, today, today)
-    .filter((e) => (e.allDay ? e.start <= today && today < e.end : localDayOf(e.start) === today))
-    .sort((a, b) => a.start.localeCompare(b.start))
-  const suggestions = suggestIds.map((id) => tasks[id]).filter((t) => t && t.due_date !== today && t.status === 'open')
-
-  return (
-    <div className="r-cols">
-      <section>
-        <h3 className="r-sub">
-          Heute <span>{todays.length}</span>
-        </h3>
-        <div className="r-list">
-          <AnimatePresence initial={false}>
-            {todays.map((t) => (
-              <motion.div key={t.id} layout initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, height: 0 }} className="r-row compact">
-                <div className="r-row-main">
-                  <span className="r-row-title">{t.title}</span>
-                  <TaskMeta task={t} showDate={false} />
-                </div>
-                <button className="icon-btn sm" aria-label={`„${t.title}“ heute nicht`} title="Heute nicht" onClick={() => moveToDay(t.id, null)}>
-                  <X size={15} />
-                </button>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-          {todays.length === 0 && <p className="muted small">Noch nichts für heute. Nimm dir etwas aus den Vorschlägen.</p>}
-          <RitualQuickAdd day={today} />
-        </div>
-        {todayEvents.length > 0 && (
-          <>
-            <h3 className="r-sub" style={{ marginTop: 16 }}>
-              Termine <span>{todayEvents.length}</span>
-            </h3>
-            <div className="r-events">
-              {todayEvents.map((e) => (
-                <div key={`${e.calendarId}|${e.id}`} className="r-event">
-                  <i style={{ background: e.color }} />
-                  <span className="r-event-time">{e.allDay ? 'ganztägig' : `${timeLabel(e.start)}–${timeLabel(e.end)}`}</span>
-                  <span className="r-event-title">{e.title}</span>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-      </section>
-      <section>
-        <h3 className="r-sub">Vorschläge</h3>
-        <div className="r-list">
-          <AnimatePresence initial={false}>
-            {suggestions.map((t) => (
-              <motion.button
-                key={t.id}
-                layout
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0, x: -30, height: 0 }}
-                className="r-row compact suggest"
-                onClick={() => {
-                  haptic(8)
-                  moveToDay(t.id, today)
-                }}
-              >
-                <span className="r-plus">
-                  <Plus size={15} />
-                </span>
-                <div className="r-row-main">
-                  <span className="r-row-title">{t.title}</span>
-                  <TaskMeta task={t} />
-                </div>
-              </motion.button>
-            ))}
-          </AnimatePresence>
-          {suggestions.length === 0 && <p className="muted small">Keine Fristen oder dringenden Aufgaben ohne Datum.</p>}
-        </div>
-      </section>
     </div>
   )
 }
@@ -336,106 +245,6 @@ function RitualQuickAdd({ day }: { day: string }) {
     <div className="r-quick">
       <Plus size={15} />
       <SmartField value={text} onChange={setText} tokens={c.parsed.tokens} placeholder={day === todayStr() ? 'Noch etwas für heute …' : 'Noch etwas für morgen …'} onSubmit={submit} onCancel={() => setText('')} className="r-quick-field" />
-    </div>
-  )
-}
-
-const DURS = [15, 30, 45, 60, 90, 120]
-
-function TimeStep({ today }: { today: string }) {
-  const tasks = useStore((s) => s.tasks)
-  const events = useStore((s) => s.events)
-  const schedule = useStore((s) => s.schedule)
-  const showToast = useStore((s) => s.showToast)
-  const open = Object.values(tasks)
-    .filter((t) => t.status === 'open' && t.due_date === today && !t.start_at && !isBlocked(tasks, t))
-    .sort(byPrio)
-  const [dur, setDur] = useState<Record<string, number>>({})
-  const [until, setUntil] = useState(20 * 60)
-  const now = new Date()
-  const from = Math.max(8 * 60, now.getHours() * 60 + now.getMinutes() + 10)
-
-  const preview = useMemo(() => {
-    const busy = busyTimes(today, Object.values(tasks), eventsFor(events, today, today))
-    return autoPlan(
-      open.map((t) => ({ id: t.id, minutes: dur[t.id] ?? t.estimate ?? 30 })),
-      busy,
-      from,
-      until,
-    )
-  }, [open, dur, tasks, events, today, from, until])
-
-  const planned = Object.values(tasks)
-    .filter((t) => t.start_at && localDayOf(t.start_at) === today)
-    .sort((a, b) => a.start_at!.localeCompare(b.start_at!))
-  const fitting = open.filter((t) => preview[t.id] !== undefined)
-
-  const apply = () => {
-    for (const t of fitting) schedule(t.id, today, preview[t.id], dur[t.id] ?? t.estimate ?? 30)
-    haptic(15)
-    showToast(`${fitting.length} ${fitting.length === 1 ? 'Aufgabe' : 'Aufgaben'} eingeplant`)
-  }
-
-  return (
-    <div>
-      {open.length === 0 ? (
-        <p className="muted">Alles, was heute ansteht, hat schon eine Uhrzeit – oder wartet noch auf etwas.</p>
-      ) : (
-        <>
-          <div className="r-list">
-            {open.map((t) => {
-              const at = preview[t.id]
-              const d = dur[t.id] ?? t.estimate ?? 30
-              return (
-                <div key={t.id} className="r-row compact time-row">
-                  <span className={`r-slot ${at === undefined ? 'none' : ''}`}>{at === undefined ? 'passt nicht' : `${hhmm(at)}–${hhmm(at + d)}`}</span>
-                  <div className="r-row-main">
-                    <span className="r-row-title">{t.title}</span>
-                  </div>
-                  <div className="r-durs" role="group" aria-label="Dauer">
-                    {DURS.map((m) => (
-                      <button key={m} className={`r-dur ${d === m ? 'on' : ''}`} onClick={() => setDur((x) => ({ ...x, [t.id]: m }))}>
-                        {durationLabel(m)}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-          <div className="r-actions">
-            <label className="muted small">
-              Spätestens bis{' '}
-              <select value={until} onChange={(e) => setUntil(Number(e.target.value))}>
-                {[17, 18, 19, 20, 21, 22, 23].map((h) => (
-                  <option key={h} value={h * 60}>
-                    {h}:00
-                  </option>
-                ))}
-              </select>
-            </label>
-            <span style={{ flex: 1 }} />
-            <button className="btn" disabled={!fitting.length} onClick={apply}>
-              <Wand2 size={16} /> {fitting.length ? `${fitting.length} einplanen` : 'Keine Lücke frei'}
-            </button>
-          </div>
-        </>
-      )}
-      {planned.length > 0 && (
-        <>
-          <h3 className="r-sub" style={{ marginTop: 18 }}>
-            Schon eingeplant
-          </h3>
-          <div className="r-timeline">
-            {planned.map((t) => (
-              <div key={t.id} className="r-tl-item">
-                <span>{timeLabel(t.start_at!)}</span>
-                <b>{t.title}</b>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
     </div>
   )
 }
@@ -516,8 +325,8 @@ function OpenStep({ today }: { today: string }) {
   if (rows.length === 0) return <p className="muted">Nichts mehr offen. Stark.</p>
   return (
     <div className="r-list">
-      {rows.map((t) => (
-        <DecideRow key={t.id} task={t} today={today} options={['done', 'tomorrow', 'later']} />
+      {treeOrder(tasks, rows).map((r) => (
+        <DecideRow key={r.task.id} task={r.task} depth={r.depth} crumb={r.crumb} today={today} options={['done', 'tomorrow', 'later']} />
       ))}
       {rows.length > 1 && (
         <button className="add-link" onClick={() => rows.forEach((t) => t.status === 'open' && t.due_date !== tomorrow && moveToDay(t.id, tomorrow))}>

@@ -31,7 +31,9 @@ Tages- und Zeitblock-Planung, Live-Sync zwischen Handy und Laptop.
 - **Vorlagen**: Aufgabe (mit Unteraufgaben) → „Als Vorlage“; anlegen über Schnelleingabe, Spaltenmenü oder `Strg`+`K`.
 - **Filter & Ansichten** (Taste `F`): Liste, Wann, Priorität, Frist, blockiert/machbar, Tags – als Ansicht speichern, synchron auf allen Geräten.
 - **Befehle** (`Strg`/`⌘`+`K`): Aufgaben, Listen, Vorlagen, Ansichten finden, Aktionen ausführen – oder direkt neue Aufgabe tippen.
-- **Tag planen / abschließen**: morgens Reste klären → Fokus wählen → automatisch in freie Lücken einplanen; abends Rückblick und Offenes bewusst verschieben.
+- **Tag planen / abschließen**: morgens Reste klären → aus allen Aufgaben ohne Termin wählen (gruppiert: *Wichtig & Fristen*,
+  *Kleinere Aufgaben*, *Alle anderen* nach Listen, mit Suche; Unteraufgaben stehen unter ihrer Aufgabe und lassen sich auch einzeln holen)
+  → Reihenfolge per Ziehen, Dauer 5 min–2 h → nacheinander in freie Lücken einplanen; abends Rückblick und Offenes bewusst verschieben.
 - **Offline**: Änderungen wirken sofort und warten bei fehlendem Netz in einer Warteschlange (Anzeige oben), die App startet auch ohne Netz.
 - **Erinnerungen** (Einstellungen): Push vor Aufgaben mit Uhrzeit, Morgenübersicht, Abend-Erinnerung.
 - **Android**: „Teilen“ → Organizer legt eine Aufgabe an (Link in den Notizen); langes Drücken aufs App-Symbol: Neu / Tag planen / Heute.
@@ -100,6 +102,7 @@ Für schnelles UI-Arbeiten: `npm run dev:api` (Worker auf :8787) und parallel `n
 
 ## Versionen
 
+- **0.6** (22.11.2026): Tag planen: Unteraufgaben unter ihrer Aufgabe, Vorschläge gruppiert (Wichtig/Kleinere/Alle anderen + Suche), Reihenfolge per Ziehen, Dauer 5 min–2 h
 - **0.5** (22.11.2026): Aufgaben mit Tag als Google Aufgaben (Liste „Organizer“, in beide Richtungen); Fix: erstmals eingeplante Aufgaben kamen nicht immer im Google Kalender an
 - **0.4** (22.11.2026): Eingabesprache mit Markierung und Vorschlägen, Aufgabennummern, geschätzte Dauer, Fristen mit Uhrzeit (+ Erinnerung)
 - **0.3** (22.11.2026): Tag planen/abschließen, Fristen, „Wartet auf“, Unteraufgaben auf Karten, Vorlagen, Filter & Ansichten,

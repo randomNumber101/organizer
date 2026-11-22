@@ -28,15 +28,26 @@ export function busyTimes(day: string, tasks: Task[], events: CalendarEvent[]): 
 }
 
 /**
- * Verteilt Aufgaben der Reihe nach in freie Lücken zwischen from und until.
+ * Verteilt Aufgaben in freie Lücken zwischen from und until.
  * Zwischen zwei Blöcken bleiben `gap` Minuten Luft. Was nicht passt, bekommt keine Zeit.
+ * `sequential`: strikt in der gegebenen Reihenfolge (jede Aufgabe nach der vorigen) – sonst füllt
+ * eine spätere, kurze Aufgabe auch eine frühere Lücke.
  */
-export function autoPlan(items: { id: string; minutes: number }[], busy: Busy[], from: number, until: number, gap = 5): Record<string, number> {
+export function autoPlan(
+  items: { id: string; minutes: number }[],
+  busy: Busy[],
+  from: number,
+  until: number,
+  opts: { gap?: number; step?: number; sequential?: boolean } = {},
+): Record<string, number> {
+  const gap = opts.gap ?? 5
+  const step = opts.step ?? 15
   const taken = [...busy]
   const out: Record<string, number> = {}
-  const snap = (m: number) => Math.ceil(m / 15) * 15
+  const snap = (m: number) => Math.ceil(m / step) * step
+  let cursor = from
   for (const it of items) {
-    let start = snap(from)
+    let start = snap(opts.sequential ? cursor : from)
     for (;;) {
       if (start + it.minutes > until) break
       const end = start + it.minutes
@@ -44,6 +55,7 @@ export function autoPlan(items: { id: string; minutes: number }[], busy: Busy[],
       if (!clash) {
         out[it.id] = start
         taken.push({ start, end })
+        cursor = end + gap
         break
       }
       start = snap(clash.end + gap)
