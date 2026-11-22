@@ -92,6 +92,7 @@ export const api = {
   googleEvents: (from: string, to: string) => request<{ events: CalendarEvent[] }>('GET', `/api/google/events?from=${from}&to=${to}`),
   googleDisconnect: () => request<{ ok: true }>('POST', '/api/google/disconnect'),
   googleCalendars: (selected: string[]) => request<{ ok: true }>('POST', '/api/google/calendars', { selected }),
+  googleTasks: (enabled: boolean) => request<GoogleStatus>('POST', '/api/google/tasks', { enabled }),
   googleRefresh: () => request<{ ok: true }>('POST', '/api/google/refresh'),
 }
 

@@ -306,6 +306,11 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
                 <CalendarCheck2 /> in Google
               </span>
             )}
+            {task.gtask_id && !task.start_at && (
+              <span className="chip time" title="Steht in Google unter Aufgaben › Organizer">
+                <CalendarCheck2 /> in Google Aufgaben
+              </span>
+            )}
           </div>
 
           <span className="prop-label">

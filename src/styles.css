@@ -3753,3 +3753,16 @@ mark.tk {
     display: none;
   }
 }
+
+/* 0.5 – Google Aufgaben */
+.settings-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 650;
+}
+.settings-card a.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

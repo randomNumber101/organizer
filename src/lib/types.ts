@@ -41,11 +41,13 @@ export interface Task {
   num: number | null
   /** geschätzte Dauer in Minuten */
   estimate: number | null
+  /** verknüpfte Google Aufgabe (Aufgaben mit Tag, ohne Uhrzeit) */
+  gtask_id?: string | null
   created_at: string
   updated_at: string
 }
 
-export type TaskPatch = Partial<Omit<Task, 'id' | 'num' | 'created_at' | 'updated_at' | 'rollover_count' | 'completed_at' | 'gcal_event_id' | 'gcal_etag'>>
+export type TaskPatch = Partial<Omit<Task, 'id' | 'num' | 'gtask_id' | 'created_at' | 'updated_at' | 'rollover_count' | 'completed_at' | 'gcal_event_id' | 'gcal_etag'>>
 
 export type ViewName = 'board' | 'today' | 'calendar'
 export type BoardMode = 'lists' | 'week'
@@ -78,6 +80,8 @@ export interface GoogleStatus {
   status?: 'ok' | 'reauth'
   email?: string | null
   calendars?: GoogleCalendarInfo[]
+  /** Google Aufgaben: Berechtigung erteilt, eingeschaltet, letzter Fehler */
+  tasks?: { granted: boolean; enabled: boolean; problem: string | null }
 }
 
 export const HORIZON_LABEL: Record<Horizon, string> = {

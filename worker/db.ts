@@ -38,6 +38,9 @@ export type TaskRow = {
   blocked_by: string
   num: number | null
   estimate: number | null
+  gtask_id: string | null
+  gtask_updated: string | null
+  gtask_dirty: number
   created_at: string
   updated_at: string
   deleted_at: string | null
@@ -66,7 +69,7 @@ const parseArr = (v: string | null | undefined): string[] => {
 }
 
 export function taskOut(r: TaskRow) {
-  const { deleted_at: _d, seq: _s, gcal_dirty: _g, tags, blocked_by, ...rest } = r
+  const { deleted_at: _d, seq: _s, gcal_dirty: _g, gtask_dirty: _gd, gtask_updated: _gu, tags, blocked_by, ...rest } = r
   return { ...rest, tags: parseArr(tags), blocked_by: parseArr(blocked_by) }
 }
 

@@ -1,5 +1,5 @@
 /**
- * Minimaler Google-Calendar-Client für den Worker (fetch, keine Bibliothek).
+ * Minimaler Google-Calendar- und Google-Tasks-Client für den Worker (fetch, keine Bibliothek).
  * OAuth 2.0 mit PKCE, Refresh-Token wird im Durable Object gespeichert.
  */
 
@@ -10,6 +10,7 @@ export interface GoogleEnv {
   GOOGLE_AUTH_URL?: string
   GOOGLE_TOKEN_URL?: string
   GOOGLE_API_URL?: string
+  GOOGLE_TASKS_URL?: string
   GOOGLE_REVOKE_URL?: string
 }
 
@@ -19,11 +20,14 @@ export interface GoogleConfig {
   authUrl: string
   tokenUrl: string
   apiUrl: string
+  tasksUrl: string
   revokeUrl: string
 }
 
-/** Alle Kalender lesen + einen eigenen Kalender „Organizer“ anlegen und darin schreiben. */
-export const SCOPES = ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/calendar.app.created']
+export const TASKS_SCOPE = 'https://www.googleapis.com/auth/tasks'
+
+/** Alle Kalender lesen, einen eigenen Kalender „Organizer“ anlegen und darin schreiben, Google Aufgaben. */
+export const SCOPES = ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/calendar.app.created', TASKS_SCOPE]
 
 export const ORGANIZER_CALENDAR_NAME = 'Organizer'
 export const ORGANIZER_CALENDAR_MARK = 'organizer-app'
@@ -36,6 +40,7 @@ export function googleConfig(env: GoogleEnv): GoogleConfig | null {
     authUrl: env.GOOGLE_AUTH_URL ?? 'https://accounts.google.com/o/oauth2/v2/auth',
     tokenUrl: env.GOOGLE_TOKEN_URL ?? 'https://oauth2.googleapis.com/token',
     apiUrl: env.GOOGLE_API_URL ?? 'https://www.googleapis.com/calendar/v3',
+    tasksUrl: env.GOOGLE_TASKS_URL ?? 'https://tasks.googleapis.com/tasks/v1',
     revokeUrl: env.GOOGLE_REVOKE_URL ?? 'https://oauth2.googleapis.com/revoke',
   }
 }
@@ -107,9 +112,16 @@ export async function revokeToken(cfg: GoogleConfig, token: string) {
   }).catch(() => undefined)
 }
 
-/** Aufruf der Calendar API */
-export async function gapi<T>(cfg: GoogleConfig, token: string, method: string, path: string, opts: { query?: Record<string, string | undefined>; body?: unknown } = {}): Promise<T> {
-  const u = new URL(cfg.apiUrl + path)
+export interface ApiOpts {
+  query?: Record<string, string | undefined>
+  body?: unknown
+  /** 'tasks' = Google Tasks API, sonst Calendar API */
+  api?: 'calendar' | 'tasks'
+}
+
+/** Aufruf der Calendar- bzw. Tasks-API */
+export async function gapi<T>(cfg: GoogleConfig, token: string, method: string, path: string, opts: ApiOpts = {}): Promise<T> {
+  const u = new URL((opts.api === 'tasks' ? cfg.tasksUrl : cfg.apiUrl) + path)
   for (const [k, v] of Object.entries(opts.query ?? {})) if (v !== undefined) u.searchParams.set(k, v)
   const res = await fetch(u.toString(), {
     method,
@@ -161,6 +173,27 @@ export interface GEventList {
   items: GEvent[]
   nextPageToken?: string
   nextSyncToken?: string
+}
+
+export interface GTask {
+  id: string
+  etag?: string
+  title?: string
+  notes?: string
+  /** RFC 3339, nur das Datum zählt */
+  due?: string
+  status?: 'needsAction' | 'completed'
+  completed?: string
+  updated: string
+  deleted?: boolean
+  hidden?: boolean
+  parent?: string
+}
+
+export interface GTaskList {
+  id: string
+  title: string
+  updated?: string
 }
 
 /** Farben der Termin-Farb-IDs (Google-Standardpalette) */

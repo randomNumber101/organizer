@@ -15,6 +15,11 @@ import {
   randomState,
   refreshAccessToken,
   revokeToken,
+  SCOPES,
+  TASKS_SCOPE,
+  type ApiOpts,
+  type GTask,
+  type GTaskList,
   type GCalendarListEntry,
   type GEvent,
   type GEventList,
@@ -42,6 +47,11 @@ interface GoogleAccountRow extends Record<string, SqlStorageValue> {
   sync_token: string | null
   status: string
   connected_at: string
+  scopes: string | null
+  tasks_list_id: string | null
+  tasks_enabled: number | null
+  tasks_cursor: string | null
+  tasks_problem: string | null
 }
 
 /** Erinnerung vor einer Frist mit Uhrzeit */
@@ -64,7 +74,11 @@ const TEMPLATE_PATH = /^\/api\/templates\/([0-9a-f-]{36})$/i
 const PREF_PATH = /^\/api\/prefs\/(views|push|ritual|board)$/
 
 /** Nach jeder Änderung: muss der Google-Termin der Aufgabe angepasst werden? */
-const MARK_DIRTY = `gcal_dirty = CASE WHEN start_at IS NOT NULL OR gcal_event_id IS NOT NULL THEN 1 ELSE gcal_dirty END`
+// Achtung: in SQLite sehen Ausdrücke in SET die ALTEN Spaltenwerte. Gut für Statusänderungen/Löschen,
+// wo Datum und Uhrzeit gleich bleiben; writeTask rechnet mit den neuen Werten selbst.
+const MARK_DIRTY = `gcal_dirty = CASE WHEN start_at IS NOT NULL OR gcal_event_id IS NOT NULL THEN 1 ELSE gcal_dirty END,
+  gtask_dirty = CASE WHEN gtask_id IS NOT NULL OR (due_date IS NOT NULL AND start_at IS NULL) THEN 1 ELSE gtask_dirty END`
+const LANE = 'Organizer'
 
 async function readJson(req: Request): Promise<unknown> {
   if (!(req.headers.get('Content-Type') ?? '').includes('application/json')) throw new HttpError(415, 'JSON erwartet')
@@ -215,7 +229,7 @@ export class OrganizerStore extends DurableObject<Env> {
       this.sql.exec(`DELETE FROM op_log WHERE created_at < ?`, now - 7 * DAY)
       this.sql.exec(`UPDATE tasks SET parent_id = NULL WHERE (deleted_at IS NULL OR deleted_at >= ?1) AND parent_id IN (SELECT id FROM tasks WHERE deleted_at < ?1)`, cutoff)
       this.sql.exec(`UPDATE tasks SET list_id = NULL WHERE list_id IN (SELECT id FROM lists WHERE deleted_at < ?)`, cutoff)
-      this.sql.exec(`DELETE FROM tasks WHERE deleted_at < ? AND gcal_dirty = 0`, cutoff)
+      this.sql.exec(`DELETE FROM tasks WHERE deleted_at < ? AND gcal_dirty = 0 AND gtask_dirty = 0`, cutoff)
       this.sql.exec(`DELETE FROM lists WHERE deleted_at < ?`, cutoff)
     })
   }
@@ -281,6 +295,11 @@ export class OrganizerStore extends DurableObject<Env> {
     if (pathname === '/api/google/events' && method === 'GET') return json(await this.googleEvents(url))
     if (pathname === '/api/google/disconnect' && method === 'POST') return json(await this.googleDisconnect())
     if (pathname === '/api/google/calendars' && method === 'POST') return json(this.googleSetCalendars(await readJson(req)))
+    if (pathname === '/api/google/tasks' && method === 'POST') {
+      const out = await this.googleTasksToggle(await readJson(req))
+      this.broadcast()
+      return json(out)
+    }
     if (pathname === '/api/google/refresh' && method === 'POST') {
       this.eventCache.clear()
       this.calendarCache = null
@@ -451,8 +470,8 @@ export class OrganizerStore extends DurableObject<Env> {
       return this.sql
         .exec<TaskRow>(
           `INSERT INTO tasks (list_id, parent_id, title, notes, status, priority, horizon, tags, due_date, start_at, end_at,
-             timezone, rrule, completed_at, sort, origin_event_id, deadline, blocked_by, estimate, num, id, created_at, updated_at, seq, gcal_event_id, gcal_etag, gcal_dirty)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+             timezone, rrule, completed_at, sort, origin_event_id, deadline, blocked_by, estimate, num, id, created_at, updated_at, seq, gcal_event_id, gcal_etag, gcal_dirty, gtask_dirty)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
           ...values,
           this.nextNum(),
           id,
@@ -462,19 +481,28 @@ export class OrganizerStore extends DurableObject<Env> {
           extra.gcal_event_id ?? null,
           extra.gcal_etag ?? null,
           extra.dirty === false ? 0 : t.start_at ? 1 : 0,
+          extra.dirty === false ? 0 : !t.start_at && t.due_date && t.status === 'open' ? 1 : 0,
         )
         .one()
     }
+    const wantsEvent = t.start_at ? 1 : 0
+    const wantsTask = !t.start_at && t.due_date ? 1 : 0
     return this.sql
       .exec<TaskRow>(
         `UPDATE tasks SET list_id = ?, parent_id = ?, title = ?, notes = ?, status = ?, priority = ?, horizon = ?, tags = ?,
            due_date = ?, start_at = ?, end_at = ?, timezone = ?, rrule = ?, completed_at = ?, sort = ?, origin_event_id = ?,
            deadline = ?, blocked_by = ?, estimate = ?,
-           updated_at = ?, seq = ?, ${extra.dirty === false ? 'gcal_dirty = gcal_dirty' : MARK_DIRTY}
+           updated_at = ?, seq = ?,
+           gcal_dirty = CASE WHEN ? = 1 AND (? = 1 OR gcal_event_id IS NOT NULL) THEN 1 ELSE gcal_dirty END,
+           gtask_dirty = CASE WHEN ? = 1 AND (? = 1 OR gtask_id IS NOT NULL) THEN 1 ELSE gtask_dirty END
          WHERE id = ? RETURNING *`,
         ...values,
         now,
         seq,
+        extra.dirty === false ? 0 : 1,
+        wantsEvent,
+        extra.dirty === false ? 0 : 1,
+        wantsTask,
         id,
       )
       .one()
@@ -677,7 +705,7 @@ export class OrganizerStore extends DurableObject<Env> {
         .exec(
           `UPDATE tasks SET
              rollover_count = rollover_count + CAST(julianday(?1) - julianday(due_date) AS INTEGER),
-             due_date = ?1, updated_at = ?2, seq = ?3
+             due_date = ?1, updated_at = ?2, seq = ?3, gtask_dirty = 1
            WHERE deleted_at IS NULL AND status = 'open' AND start_at IS NULL AND due_date < ?1
            RETURNING id`,
           today,
@@ -1098,7 +1126,12 @@ export class OrganizerStore extends DurableObject<Env> {
     if (acc.access_token && (acc.access_expires_at ?? 0) > Date.now() + MIN) return acc.access_token
     try {
       const t = await refreshAccessToken(cfg, acc.refresh_token)
-      this.sql.exec(`UPDATE google_account SET access_token = ?, access_expires_at = ?, status = 'ok' WHERE id = 1`, t.access_token, Date.now() + t.expires_in * 1000)
+      this.sql.exec(
+        `UPDATE google_account SET access_token = ?, access_expires_at = ?, status = 'ok', scopes = COALESCE(?, scopes) WHERE id = 1`,
+        t.access_token,
+        Date.now() + t.expires_in * 1000,
+        t.scope ?? null,
+      )
       return t.access_token
     } catch (e) {
       if (e instanceof GoogleApiError && (e.reason === 'invalid_grant' || e.status === 400 || e.status === 401)) {
@@ -1109,7 +1142,7 @@ export class OrganizerStore extends DurableObject<Env> {
     }
   }
 
-  private async g<T>(method: string, path: string, opts: { query?: Record<string, string | undefined>; body?: unknown } = {}): Promise<T> {
+  private async g<T>(method: string, path: string, opts: ApiOpts = {}): Promise<T> {
     const cfg = this.cfg()!
     try {
       return await gapi<T>(cfg, await this.token(), method, path, opts)
@@ -1139,8 +1172,21 @@ export class OrganizerStore extends DurableObject<Env> {
     const configured = !!this.cfg()
     const acc = this.account()
     if (!configured || !acc) return { configured, connected: false }
-    const base = { configured, connected: true, status: acc.status, email: acc.email }
+    const granted = this.tasksGranted(acc)
+    const base = {
+      configured,
+      connected: true,
+      status: acc.status,
+      email: acc.email,
+      tasks: { granted, enabled: acc.tasks_enabled === 1, problem: acc.tasks_problem },
+    }
     if (acc.status !== 'ok') return base
+    // halb eingerichtete Aufgaben-Liste nachholen
+    if (granted && acc.tasks_enabled === 1 && !acc.tasks_list_id) {
+      await this.enableTasks().catch(() => undefined)
+      const a = this.account()
+      base.tasks = { granted, enabled: a?.tasks_enabled === 1, problem: a?.tasks_problem ?? null }
+    }
     try {
       const selected: string[] | null = acc.selected_calendars ? JSON.parse(acc.selected_calendars) : null
       if (!acc.organizer_calendar_id) {
@@ -1201,18 +1247,22 @@ export class OrganizerStore extends DurableObject<Env> {
       const refresh = t.refresh_token ?? existing?.refresh_token
       if (!refresh) return redirect('/?google=error&reason=no_refresh_token')
       this.sql.exec(
-        `INSERT INTO google_account (id, refresh_token, access_token, access_expires_at, status, connected_at)
-         VALUES (1, ?, ?, ?, 'ok', ?)
+        `INSERT INTO google_account (id, refresh_token, access_token, access_expires_at, status, connected_at, scopes)
+         VALUES (1, ?, ?, ?, 'ok', ?, ?)
          ON CONFLICT (id) DO UPDATE SET refresh_token = excluded.refresh_token, access_token = excluded.access_token,
-           access_expires_at = excluded.access_expires_at, status = 'ok'`,
+           access_expires_at = excluded.access_expires_at, status = 'ok', scopes = excluded.scopes`,
         refresh,
         t.access_token,
         Date.now() + t.expires_in * 1000,
         nowIso(),
+        t.scope ?? SCOPES.join(' '),
       )
       this.calendarCache = null
       this.eventCache.clear()
       await this.ensureOrganizerCalendar(await this.calendars(true))
+      // Google Aufgaben: beim ersten Mal mit Berechtigung automatisch an (außer bewusst ausgeschaltet)
+      const acc = this.account()
+      if (acc && this.tasksGranted(acc) && acc.tasks_enabled !== 0) await this.enableTasks().catch((e) => console.warn('tasks enable', e))
       this.metaSet('gconnected_at', Date.now())
       return redirect('/?google=connected')
     } catch (e) {
@@ -1250,7 +1300,7 @@ export class OrganizerStore extends DurableObject<Env> {
     if (cfg && acc) await revokeToken(cfg, acc.refresh_token)
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(`DELETE FROM google_account`)
-      this.sql.exec(`UPDATE tasks SET gcal_event_id = NULL, gcal_etag = NULL, gcal_dirty = 0`)
+      this.sql.exec(`UPDATE tasks SET gcal_event_id = NULL, gcal_etag = NULL, gcal_dirty = 0, gtask_id = NULL, gtask_updated = NULL, gtask_dirty = 0`)
       this.metaSet('gpull_at', null)
       this.metaSet('gpush_at', null)
     })
@@ -1331,9 +1381,10 @@ export class OrganizerStore extends DurableObject<Env> {
   // -------------------------------------------------------------------------
   private queuePush() {
     const acc = this.account()
-    if (!acc || acc.status !== 'ok' || !acc.organizer_calendar_id) return
-    if (!this.sql.exec(`SELECT 1 FROM tasks WHERE gcal_dirty = 1 LIMIT 1`).toArray().length) return
-    this.ctx.waitUntil(this.pushGoogle())
+    if (!acc || acc.status !== 'ok') return
+    const cal = !!acc.organizer_calendar_id && this.sql.exec(`SELECT 1 FROM tasks WHERE gcal_dirty = 1 LIMIT 1`).toArray().length > 0
+    const tasks = this.tasksActive(acc) && this.sql.exec(`SELECT 1 FROM tasks WHERE gtask_dirty = 1 LIMIT 1`).toArray().length > 0
+    if (cal || tasks) this.ctx.waitUntil(this.pushGoogle())
   }
 
   private pushGoogle(): Promise<void> {
@@ -1344,6 +1395,11 @@ export class OrganizerStore extends DurableObject<Env> {
   }
 
   private async doPush() {
+    await this.pushCalendar()
+    await this.pushTasks()
+  }
+
+  private async pushCalendar() {
     const acc = this.account()
     if (!acc || acc.status !== 'ok' || !acc.organizer_calendar_id || !this.cfg()) return
     const cal = encodeURIComponent(acc.organizer_calendar_id)
@@ -1426,12 +1482,29 @@ export class OrganizerStore extends DurableObject<Env> {
 
   private async doPull(): Promise<boolean> {
     const acc = this.account()
-    if (!acc || acc.status !== 'ok' || !acc.organizer_calendar_id || !this.cfg()) return false
+    if (!acc || acc.status !== 'ok' || !this.cfg()) return false
     this.lastPull = Date.now()
     if (this.pushing) await this.pushing
-    const cal = encodeURIComponent(acc.organizer_calendar_id)
+    let changed = false
+    if (acc.organizer_calendar_id) changed = await this.pullCalendar(acc)
+    if (this.tasksActive(this.account())) {
+      try {
+        changed = (await this.pullTasks()) || changed
+      } catch (e) {
+        console.warn('tasks pull', e)
+      }
+    }
+    if (this.metaGet('gpull_at') === null) {
+      this.metaSet('gpull_at', Date.now() + PULL_EVERY)
+      await this.scheduleAlarm()
+    }
+    return changed
+  }
+
+  private async pullCalendar(acc: GoogleAccountRow): Promise<boolean> {
+    const cal = encodeURIComponent(acc.organizer_calendar_id ?? '')
     const items: GEvent[] = []
-    let syncToken = acc.sync_token
+    const syncToken = acc.sync_token
     let pageToken: string | undefined
     let nextSync: string | undefined
     try {
@@ -1448,8 +1521,7 @@ export class OrganizerStore extends DurableObject<Env> {
     } catch (e) {
       if (e instanceof GoogleApiError && e.status === 410) {
         this.sql.exec(`UPDATE google_account SET sync_token = NULL WHERE id = 1`)
-        syncToken = null
-        return this.doPull()
+        return this.pullCalendar({ ...acc, sync_token: null })
       }
       throw e
     }
@@ -1473,8 +1545,8 @@ export class OrganizerStore extends DurableObject<Env> {
           const timed = !!ev.start.dateTime
           this.sql.exec(
             `INSERT INTO tasks (id, title, notes, status, priority, horizon, tags, due_date, start_at, end_at, timezone, sort,
-               created_at, updated_at, seq, gcal_event_id, gcal_etag, gcal_dirty, origin_event_id)
-             VALUES (?, ?, ?, 'open', 4, 'backlog', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+               created_at, updated_at, seq, gcal_event_id, gcal_etag, gcal_dirty, origin_event_id, num)
+             VALUES (?, ?, ?, 'open', 4, 'backlog', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
             id,
             (ev.summary ?? '').trim() || '(ohne Titel)',
             ev.description ?? null,
@@ -1489,6 +1561,7 @@ export class OrganizerStore extends DurableObject<Env> {
             ev.id,
             ev.etag,
             ev.id,
+            this.nextNum(),
           )
           changed = true
           continue
@@ -1541,10 +1614,277 @@ export class OrganizerStore extends DurableObject<Env> {
       }
       if (nextSync) this.sql.exec(`UPDATE google_account SET sync_token = ? WHERE id = 1`, nextSync)
     })
-    if (this.metaGet('gpull_at') === null) {
-      this.metaSet('gpull_at', Date.now() + PULL_EVERY)
-      await this.scheduleAlarm()
+    return changed
+  }
+
+  // -------------------------------------------------------------------------
+  // Google Aufgaben – Aufgaben mit Tag (ohne Uhrzeit) in der Liste „Organizer“
+  // -------------------------------------------------------------------------
+  private tasksGranted(acc: GoogleAccountRow | null): boolean {
+    return !!acc?.scopes?.split(/\s+/).includes(TASKS_SCOPE)
+  }
+
+  private tasksActive(acc: GoogleAccountRow | null): acc is GoogleAccountRow & { tasks_list_id: string } {
+    return !!acc && acc.status === 'ok' && acc.tasks_enabled === 1 && !!acc.tasks_list_id && this.tasksGranted(acc)
+  }
+
+  private taskProblem(e: unknown): string {
+    if (e instanceof GoogleApiError) {
+      if (e.status === 403 && /accessNotConfigured|SERVICE_DISABLED|disabled/i.test(`${e.reason} ${e.message}`)) return 'api-disabled'
+      if (e.status === 403 || e.status === 401) return 'scope'
+      return e.reason ?? e.message
     }
+    if (e instanceof HttpError && e.status === 409) return 'reauth'
+    return e instanceof Error ? e.message : String(e)
+  }
+
+  /** Liste „Organizer“ finden/anlegen, alle offenen Aufgaben mit Tag vormerken */
+  private async enableTasks() {
+    const acc = this.account()
+    if (!acc) throw new HttpError(409, 'Google ist nicht verbunden')
+    if (!this.tasksGranted(acc)) throw new HttpError(409, 'Für Google Aufgaben fehlt die Berechtigung – bitte Google neu verbinden.')
+    try {
+      let listId = acc.tasks_list_id
+      if (!listId) {
+        const lists: GTaskList[] = []
+        let pageToken: string | undefined
+        do {
+          const r = await this.g<{ items?: GTaskList[]; nextPageToken?: string }>('GET', '/users/@me/lists', { api: 'tasks', query: { maxResults: '100', pageToken } })
+          lists.push(...(r.items ?? []))
+          pageToken = r.nextPageToken
+        } while (pageToken)
+        listId = lists.find((l) => l.title === LANE)?.id ?? (await this.g<GTaskList>('POST', '/users/@me/lists', { api: 'tasks', body: { title: LANE } })).id
+      }
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec(`UPDATE google_account SET tasks_list_id = ?, tasks_enabled = 1, tasks_problem = NULL, tasks_cursor = NULL WHERE id = 1`, listId)
+        this.sql.exec(`UPDATE tasks SET gtask_dirty = 1 WHERE deleted_at IS NULL AND status = 'open' AND due_date IS NOT NULL AND start_at IS NULL`)
+      })
+    } catch (e) {
+      this.sql.exec(`UPDATE google_account SET tasks_problem = ? WHERE id = 1`, this.taskProblem(e))
+      throw e
+    }
+    this.metaSet('gpush_at', Date.now() + 500)
+    this.metaSet('gpull_at', Date.now() + 5000)
+    await this.scheduleAlarm()
+  }
+
+  private async disableTasks() {
+    const acc = this.account()
+    if (acc?.tasks_list_id && this.tasksGranted(acc)) {
+      // die ganze Liste in Google entfernen – die Aufgaben bleiben in der App
+      await this.g('DELETE', `/users/@me/lists/${encodeURIComponent(acc.tasks_list_id)}`, { api: 'tasks' }).catch((e) => {
+        if (!(e instanceof GoogleApiError && (e.status === 404 || e.status === 410))) console.warn('tasks list delete', e)
+      })
+    }
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(`UPDATE google_account SET tasks_enabled = 0, tasks_list_id = NULL, tasks_cursor = NULL, tasks_problem = NULL WHERE id = 1`)
+      this.sql.exec(`UPDATE tasks SET gtask_id = NULL, gtask_updated = NULL, gtask_dirty = 0`)
+    })
+  }
+
+  private async googleTasksToggle(body: unknown) {
+    const enabled = (body as { enabled?: unknown } | null)?.enabled
+    if (typeof enabled !== 'boolean') throw new HttpError(400, 'enabled fehlt')
+    if (!this.account()) throw new HttpError(409, 'Google ist nicht verbunden')
+    if (enabled) {
+      try {
+        await this.enableTasks()
+      } catch (e) {
+        if (e instanceof HttpError) throw e
+        const p = this.taskProblem(e)
+        throw new HttpError(
+          502,
+          p === 'api-disabled'
+            ? 'Die Google Tasks API ist in deinem Google-Cloud-Projekt noch nicht aktiviert.'
+            : p === 'scope'
+              ? 'Google erlaubt der App den Zugriff auf Aufgaben nicht – bitte neu verbinden und den Haken bei „Aufgaben“ setzen.'
+              : `Google Aufgaben: ${p}`,
+        )
+      }
+    } else await this.disableTasks()
+    return this.googleStatus()
+  }
+
+  private async pushTasks() {
+    const acc = this.account()
+    if (!this.tasksActive(acc) || !this.cfg()) return
+    const list = encodeURIComponent(acc.tasks_list_id)
+    let failed = false
+    for (let round = 0; round < 10 && !failed; round++) {
+      const rows = this.sql.exec<TaskRow>(`SELECT * FROM tasks WHERE gtask_dirty = 1 ORDER BY updated_at LIMIT 25`).toArray()
+      if (!rows.length) break
+      for (const t of rows) {
+        try {
+          // einmal verknüpft, bleibt sie in Google, bis sie gelöscht wird oder eine Uhrzeit bekommt
+          const want = !t.deleted_at && !t.start_at && (t.gtask_id ? true : !!t.due_date && t.status === 'open')
+          let gid = t.gtask_id
+          let updated = t.gtask_updated
+          if (want) {
+            const body: Record<string, unknown> = {
+              title: t.title.slice(0, 1024),
+              notes: (t.notes ?? '').slice(0, 8000),
+              due: t.due_date ? `${t.due_date}T00:00:00.000Z` : null,
+              status: t.status === 'done' ? 'completed' : 'needsAction',
+            }
+            if (t.status === 'open') body.completed = null
+            let res: GTask | null = null
+            if (gid) {
+              res = await this.g<GTask>('PATCH', `/lists/${list}/tasks/${encodeURIComponent(gid)}`, { api: 'tasks', body }).catch((e) => {
+                if (e instanceof GoogleApiError && (e.status === 404 || e.status === 410)) return null
+                throw e
+              })
+            }
+            if (!res) {
+              if (!body.due) delete body.due
+              delete body.completed
+              res = await this.g<GTask>('POST', `/lists/${list}/tasks`, { api: 'tasks', body })
+            }
+            gid = res.id
+            updated = res.updated
+          } else if (gid) {
+            await this.g('DELETE', `/lists/${list}/tasks/${encodeURIComponent(gid)}`, { api: 'tasks' }).catch((e) => {
+              if (e instanceof GoogleApiError && (e.status === 404 || e.status === 410)) return
+              throw e
+            })
+            gid = null
+            updated = null
+          }
+          this.sql.exec(
+            `UPDATE tasks SET gtask_id = ?, gtask_updated = ?, gtask_dirty = CASE WHEN updated_at = ? THEN 0 ELSE gtask_dirty END WHERE id = ?`,
+            gid,
+            updated,
+            t.updated_at,
+            t.id,
+          )
+        } catch (e) {
+          console.warn('tasks push', t.id, e)
+          failed = true
+          const p = this.taskProblem(e)
+          if (p === 'api-disabled' || p === 'scope') this.sql.exec(`UPDATE google_account SET tasks_problem = ? WHERE id = 1`, p)
+          break
+        }
+      }
+    }
+    if (failed) {
+      this.metaSet('gpush_at', Date.now() + 5 * MIN)
+      await this.scheduleAlarm()
+    } else if (acc.tasks_problem) this.sql.exec(`UPDATE google_account SET tasks_problem = NULL WHERE id = 1`)
+  }
+
+  /** Änderungen aus Google Aufgaben: abgehakt, umbenannt, verschoben, neu, gelöscht */
+  private async pullTasks(): Promise<boolean> {
+    const acc = this.account()
+    if (!this.tasksActive(acc)) return false
+    const list = encodeURIComponent(acc.tasks_list_id)
+    const since = acc.tasks_cursor
+    const items: GTask[] = []
+    let pageToken: string | undefined
+    do {
+      const r = await this.g<{ items?: GTask[]; nextPageToken?: string }>('GET', `/lists/${list}/tasks`, {
+        api: 'tasks',
+        query: { maxResults: '100', showCompleted: 'true', showHidden: 'true', showDeleted: since ? 'true' : 'false', updatedMin: since ?? undefined, pageToken },
+      })
+      items.push(...(r.items ?? []))
+      pageToken = r.nextPageToken
+    } while (pageToken)
+
+    const tz = this.pushTz() ?? 'Europe/Berlin'
+    const today = utcToZoned(Date.now(), tz).date
+    const complete: { id: string; updated: string; recurring: boolean }[] = []
+    const reopen: { id: string; updated: string }[] = []
+    let changed = false
+    let cursor = since
+    this.ctx.storage.transactionSync(() => {
+      const now = nowIso()
+      let seq: number | null = null
+      const bump = () => (seq ??= this.nextSeq())
+      for (const it of items) {
+        if (!cursor || it.updated > cursor) cursor = it.updated
+        const t = this.sql.exec<TaskRow>(`SELECT * FROM tasks WHERE gtask_id = ?`, it.id).toArray()[0]
+        const due = it.due ? it.due.slice(0, 10) : null
+        if (!t) {
+          // direkt in Google in der Liste „Organizer“ angelegt → neue Aufgabe
+          const title = (it.title ?? '').trim()
+          if (it.deleted || it.status === 'completed' || !title) continue
+          this.sql.exec(
+            `INSERT INTO tasks (id, title, notes, status, priority, horizon, tags, blocked_by, due_date, sort, num, created_at, updated_at, seq, gtask_id, gtask_updated, gtask_dirty)
+             VALUES (?, ?, ?, 'open', 4, 'backlog', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+            crypto.randomUUID(),
+            title.slice(0, 500),
+            it.notes || null,
+            due,
+            Date.now(),
+            this.nextNum(),
+            now,
+            now,
+            bump(),
+            it.id,
+            it.updated,
+          )
+          changed = true
+          continue
+        }
+        if (t.gtask_dirty || t.deleted_at) continue // lokale Änderung gewinnt, wird gleich übertragen
+        if (it.updated === t.gtask_updated) continue // eigene Änderung
+        if (it.deleted) {
+          // in Google gelöscht → Aufgabe bleibt in der App, verliert nur ihren Tag
+          this.sql.exec(
+            `UPDATE tasks SET gtask_id = NULL, gtask_updated = NULL, due_date = NULL, rollover_count = 0, updated_at = ?, seq = ? WHERE id = ?`,
+            now,
+            bump(),
+            t.id,
+          )
+          changed = true
+          continue
+        }
+        const title = (it.title ?? '').trim().slice(0, 500) || t.title
+        const notes = it.notes || null
+        if (title !== t.title || notes !== t.notes || due !== t.due_date) {
+          this.sql.exec(
+            `UPDATE tasks SET title = ?, notes = ?, due_date = ?, rollover_count = CASE WHEN ? IS NOT due_date THEN 0 ELSE rollover_count END,
+               gtask_updated = ?, updated_at = ?, seq = ? WHERE id = ?`,
+            title,
+            notes,
+            due,
+            due,
+            it.updated,
+            now,
+            bump(),
+            t.id,
+          )
+          changed = true
+        } else {
+          this.sql.exec(`UPDATE tasks SET gtask_updated = ? WHERE id = ?`, it.updated, t.id)
+        }
+        const doneInGoogle = it.status === 'completed'
+        if (doneInGoogle && t.status === 'open') complete.push({ id: t.id, updated: it.updated, recurring: !!t.rrule })
+        if (!doneInGoogle && t.status === 'done') reopen.push({ id: t.id, updated: it.updated })
+      }
+      if (cursor !== since) this.sql.exec(`UPDATE google_account SET tasks_cursor = ? WHERE id = 1`, cursor)
+    })
+
+    // Abhaken/Öffnen wie in der App (wiederkehrende rücken vor, Unteraufgaben werden mit erledigt)
+    for (const c of complete) {
+      const kids = this.sql
+        .exec<{ id: string }>(
+          `WITH RECURSIVE sub(id) AS (SELECT id FROM tasks WHERE parent_id = ?1 AND deleted_at IS NULL
+             UNION SELECT t.id FROM tasks t JOIN sub ON t.parent_id = sub.id WHERE t.deleted_at IS NULL)
+           SELECT sub.id FROM sub JOIN tasks USING (id) WHERE tasks.status = 'open'`,
+          c.id,
+        )
+        .toArray()
+        .map((r) => r.id)
+      this.bulkStatus({ ids: [c.id, ...(c.recurring ? [] : kids)], status: 'done', today })
+      // nicht wiederkehrend: Google hat schon den richtigen Stand – nichts zurückschreiben
+      if (!c.recurring) this.sql.exec(`UPDATE tasks SET gtask_dirty = 0, gtask_updated = ? WHERE id = ?`, c.updated, c.id)
+      changed = true
+    }
+    for (const r of reopen) {
+      this.bulkStatus({ ids: [r.id], status: 'open', today })
+      this.sql.exec(`UPDATE tasks SET gtask_dirty = 0, gtask_updated = ? WHERE id = ?`, r.updated, r.id)
+      changed = true
+    }
+    if (complete.some((c) => c.recurring)) this.queuePush()
     return changed
   }
 }

@@ -120,6 +120,7 @@ interface State {
   connectGoogle: () => void
   disconnectGoogle: () => Promise<void>
   setGoogleCalendars: (ids: string[]) => Promise<void>
+  setGoogleTasks: (enabled: boolean) => Promise<boolean>
   importEvent: (ev: CalendarEvent) => void
 }
 
@@ -830,6 +831,18 @@ export const useStore = create<State>()((set, get) => {
       } catch (e) {
         get().showToast(msg(e), 'error')
         void get().loadGoogle()
+      }
+    },
+
+    setGoogleTasks: async (enabled) => {
+      try {
+        set({ google: await api.googleTasks(enabled) })
+        get().showToast(enabled ? 'Aufgaben mit Tag erscheinen jetzt in Google unter „Aufgaben“' : 'Google Aufgaben ausgeschaltet – die Liste „Organizer“ wurde in Google entfernt')
+        return true
+      } catch (e) {
+        get().showToast(msg(e), 'error')
+        void get().loadGoogle()
+        return false
       }
     },
 

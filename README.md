@@ -37,16 +37,21 @@ Tages- und Zeitblock-Planung, Live-Sync zwischen Handy und Laptop.
 - **Android**: „Teilen“ → Organizer legt eine Aufgabe an (Link in den Notizen); langes Drücken aufs App-Symbol: Neu / Tag planen / Heute.
 - Tasten: `Strg`+`K` Befehle · `N` neu · `/` suchen · `F` Filter · `U` Unteraufgaben · `1` `2` `3` Ansicht · `T` heute · `Esc` schließen
 
-## Google Kalender
+## Google Kalender & Google Aufgaben
 
-Aufgaben mit Uhrzeit landen in einem eigenen Google-Kalender **„Organizer“** (mit Google-Erinnerung, solange in der App keine Push-Erinnerungen aktiv sind).
-Verschiebt oder löscht man sie dort, zieht die App nach; Termine, die man direkt im Kalender „Organizer“ anlegt, werden zu Aufgaben.
-Alle anderen Kalender werden nur angezeigt (Auswahl in den Einstellungen).
+- Aufgaben **mit Uhrzeit** landen als Termin in einem eigenen Google-Kalender **„Organizer“** (mit Google-Erinnerung, solange in der App
+  keine Push-Erinnerungen aktiv sind). Verschiebt oder löscht man sie dort, zieht die App nach; Termine, die man direkt im Kalender
+  „Organizer“ anlegt, werden zu Aufgaben. Alle anderen Kalender werden nur angezeigt (Auswahl in den Einstellungen).
+- Aufgaben **mit Tag, ohne Uhrzeit** landen als **Google Aufgabe** in der Liste **„Organizer“** – in der Google-Kalender-App am jeweiligen
+  Tag mit Häkchen. Abhaken (auch wiederkehrende: die rücken vor), Umbenennen, Verschieben und neue Aufgaben in dieser Liste kommen
+  zurück in die App (alle 10 Min. und beim Öffnen). In Google gelöscht → die Aufgabe bleibt in der App, nur ohne Tag.
+  Bekommt eine Aufgabe eine Uhrzeit, wird aus der Google Aufgabe ein Termin. Ein/aus in den Einstellungen (aus = Liste wird in Google entfernt).
 
-Einrichtung (einmalig): Google-Cloud-Projekt → Google Calendar API aktivieren → Zustimmungsbildschirm „Extern“, auf
-**In Produktion** stellen → OAuth-Client „Webanwendung“ mit Weiterleitungs-URI `https://<deine-domain>/api/google/callback`
+Einrichtung (einmalig): Google-Cloud-Projekt → **Google Calendar API** und **Google Tasks API** aktivieren → Zustimmungsbildschirm „Extern“,
+auf **In Produktion** stellen → OAuth-Client „Webanwendung“ mit Weiterleitungs-URI `https://<deine-domain>/api/google/callback`
 → im Worker die Variablen `GOOGLE_CLIENT_ID` und `GOOGLE_CLIENT_SECRET` setzen → in der App unter Einstellungen verbinden.
-Berechtigungen: `calendar.readonly` (lesen) und `calendar.app.created` (nur der eigene Kalender „Organizer“ wird beschrieben).
+Berechtigungen: `calendar.readonly` (lesen), `calendar.app.created` (nur der eigene Kalender „Organizer“ wird beschrieben) und `tasks` (Google Aufgaben;
+die App schreibt nur in ihre Liste „Organizer“). Wer schon vor 0.5 verbunden war: Tasks API aktivieren und in den Einstellungen „Neu verbinden“.
 
 ## Aufbau
 
@@ -55,7 +60,7 @@ Berechtigungen: `calendar.readonly` (lesen) und `calendar.app.created` (nur der 
 - `worker/store.ts` – **ein** Durable Object `OrganizerStore` hält alles: SQLite-Datenbank, Anmeldung
   (Passwort aus dem Secret `APP_PASSWORD`, Sitzungen per Cookie), REST-API und die WebSocket-Verbindungen
   für den Live-Sync. Nächtliches Aufräumen per Alarm.
-- `worker/google.ts` – schlanker Google-Calendar-Client (OAuth mit PKCE, Termine lesen/schreiben).
+- `worker/google.ts` – schlanker Google-Client (OAuth mit PKCE, Calendar- und Tasks-API).
 - `worker/push.ts` – Web-Push ohne Bibliothek: VAPID-Signatur per WebCrypto, leerer „Stups“; der Service Worker
   (`src/sw.ts`) holt den Inhalt danach über `/api/push/pending` ab.
 - `src/lib/lang.ts` – Eingabesprache (Parser mit Positionen für die Markierung), `src/lib/compose.ts` macht daraus Felder,
@@ -90,10 +95,12 @@ Für schnelles UI-Arbeiten: `npm run dev:api` (Worker auf :8787) und parallel `n
 3. ✅ Google Kalender in beide Richtungen
 4. ✅ Push-Erinnerungen, Offline-Warteschlange, Tag-planen-Ritual, Fristen, Blockaden, Vorlagen, Filter, Befehlspalette
 5. ✅ Eingabesprache, Aufgabennummern, geschätzte Dauer, Fristen mit Uhrzeit
-6. Import aus Google Tasks
+6. ✅ Google Aufgaben in beide Richtungen
+7. Import aus anderen Google-Aufgabenlisten (TasksBoard)
 
 ## Versionen
 
+- **0.5** (22.11.2026): Aufgaben mit Tag als Google Aufgaben (Liste „Organizer“, in beide Richtungen); Fix: erstmals eingeplante Aufgaben kamen nicht immer im Google Kalender an
 - **0.4** (22.11.2026): Eingabesprache mit Markierung und Vorschlägen, Aufgabennummern, geschätzte Dauer, Fristen mit Uhrzeit (+ Erinnerung)
 - **0.3** (22.11.2026): Tag planen/abschließen, Fristen, „Wartet auf“, Unteraufgaben auf Karten, Vorlagen, Filter & Ansichten,
   Befehlspalette, Offline-Modus, Push-Erinnerungen + Morgenübersicht, Teilen-Ziel & App-Verknüpfungen

@@ -159,4 +159,22 @@ export const MIGRATIONS: Migration[] = [
       `UPDATE tasks SET seq = (SELECT value FROM meta WHERE key = 'seq') WHERE deleted_at IS NULL`,
     ],
   },
+  {
+    id: 5,
+    name: 'google_tasks',
+    statements: [
+      // Aufgaben mit Tag (ohne Uhrzeit) als Google Aufgaben in der Liste „Organizer“
+      `ALTER TABLE tasks ADD COLUMN gtask_id TEXT`,
+      `ALTER TABLE tasks ADD COLUMN gtask_updated TEXT`,
+      `ALTER TABLE tasks ADD COLUMN gtask_dirty INTEGER NOT NULL DEFAULT 0`,
+      `CREATE INDEX tasks_gtask_dirty_idx ON tasks (gtask_dirty) WHERE gtask_dirty = 1`,
+      `CREATE INDEX tasks_gtask_idx ON tasks (gtask_id)`,
+      `ALTER TABLE google_account ADD COLUMN scopes TEXT`,
+      `ALTER TABLE google_account ADD COLUMN tasks_list_id TEXT`,
+      // NULL = noch nicht entschieden (wird beim ersten Mal mit Berechtigung eingeschaltet), 0 = aus, 1 = an
+      `ALTER TABLE google_account ADD COLUMN tasks_enabled INTEGER`,
+      `ALTER TABLE google_account ADD COLUMN tasks_cursor TEXT`,
+      `ALTER TABLE google_account ADD COLUMN tasks_problem TEXT`,
+    ],
+  },
 ]

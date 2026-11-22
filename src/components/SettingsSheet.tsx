@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { Bell, BellOff, CalendarDays, Check as CheckIcon, ChevronRight, Download, LayoutTemplate, LogOut, RefreshCw, Send, Unplug, X } from 'lucide-react'
+import { Bell, BellOff, CalendarDays, Check as CheckIcon, ChevronRight, Download, ExternalLink, LayoutTemplate, ListTodo, LogOut, RefreshCw, Send, Unplug, X } from 'lucide-react'
 import LangHelp from './LangHelp'
 import { useStore } from '../store'
 import { useIsMobile } from '../hooks/useMedia'
@@ -92,7 +92,7 @@ function GoogleSection() {
           <p>Damit sich die App mit Google verbinden darf, braucht sie einmalig eigene Zugangsdaten von Google. Das geht kostenlos:</p>
           <ol className="steps">
             <li>
-              In der <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noreferrer">Google Cloud Console</a> ein Projekt anlegen und die <b>Google Calendar API</b> aktivieren.
+              In der <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noreferrer">Google Cloud Console</a> ein Projekt anlegen und die <b>Google Calendar API</b> sowie die <b>Google Tasks API</b> aktivieren.
             </li>
             <li>
               Unter „Google Auth Platform“ den Zustimmungsbildschirm einrichten (Zielgruppe <b>Extern</b>) und auf <b>„In Produktion“</b> stellen.
@@ -115,7 +115,7 @@ function GoogleSection() {
 
       {google?.configured && !google.connected && (
         <div className="settings-card">
-          <p>Verbinde deinen Google Kalender: Deine Termine erscheinen im Planer und Kalender, und Aufgaben mit Uhrzeit landen in einem eigenen Kalender „Organizer“ – auch auf dem Handy in der Google-Kalender-App.</p>
+          <p>Verbinde deinen Google Kalender: Deine Termine erscheinen im Planer und Kalender, Aufgaben mit Uhrzeit landen in einem eigenen Kalender „Organizer“ und Aufgaben mit Tag als Google Aufgaben – auch auf dem Handy in der Google-Kalender-App.</p>
           <div>
             <button className="btn primary" onClick={connect}>
               Mit Google verbinden
@@ -181,7 +181,107 @@ function GoogleSection() {
           </div>
         </div>
       )}
+      {google?.connected && google.status !== 'reauth' && <GoogleTasksCard />}
     </section>
+  )
+}
+
+const TASKS_API = 'https://console.cloud.google.com/apis/library/tasks.googleapis.com'
+
+/** Aufgaben mit Tag ↔ Google Aufgaben (Liste „Organizer“) */
+function GoogleTasksCard() {
+  const tasks = useStore((s) => s.google?.tasks)
+  const connect = useStore((s) => s.connectGoogle)
+  const setGoogleTasks = useStore((s) => s.setGoogleTasks)
+  const [busy, setBusy] = useState(false)
+  const [confirm, setConfirm] = useState(false)
+  if (!tasks) return null
+  const run = async (v: boolean) => {
+    setBusy(true)
+    await setGoogleTasks(v)
+    setBusy(false)
+    setConfirm(false)
+  }
+  const apiLink = (
+    <a className="btn sm" href={TASKS_API} target="_blank" rel="noreferrer">
+      <ExternalLink size={14} /> Tasks API aktivieren
+    </a>
+  )
+  return (
+    <div className="settings-card">
+      <div className="settings-card-title">
+        <ListTodo size={17} /> Google Aufgaben
+        {tasks.enabled && tasks.granted && !tasks.problem && <span className="live-dot on" title="aktiv" />}
+      </div>
+      {!tasks.granted ? (
+        <>
+          <p>Aufgaben mit Tag (ohne Uhrzeit) können als Google Aufgaben im Kalender erscheinen – mit Häkchen, das in beide Richtungen abgleicht.</p>
+          <ol className="steps">
+            <li>
+              In der Google Cloud Console (dasselbe Projekt wie für den Kalender) die <a href={TASKS_API} target="_blank" rel="noreferrer">Google Tasks API</a> aktivieren.
+            </li>
+            <li>Hier auf „Neu verbinden“ tippen und bei Google auch den Zugriff auf <b>Aufgaben</b> erlauben.</li>
+          </ol>
+          <div>
+            <button className="btn primary" onClick={connect}>
+              Neu verbinden
+            </button>
+          </div>
+        </>
+      ) : tasks.problem === 'api-disabled' ? (
+        <>
+          <p>
+            Google meldet: Die <b>Google Tasks API</b> ist in deinem Cloud-Projekt noch nicht aktiviert. Aktivieren, ein, zwei Minuten warten, dann erneut prüfen.
+          </p>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {apiLink}
+            <button className="btn sm primary" disabled={busy} onClick={() => void run(true)}>
+              <RefreshCw size={14} /> Erneut prüfen
+            </button>
+          </div>
+        </>
+      ) : tasks.problem === 'scope' ? (
+        <>
+          <p>Google erlaubt der App den Zugriff auf Aufgaben nicht. Bitte neu verbinden und bei Google den Haken bei „Aufgaben“ setzen.</p>
+          <div>
+            <button className="btn primary" onClick={connect}>
+              Neu verbinden
+            </button>
+          </div>
+        </>
+      ) : tasks.enabled ? (
+        <>
+          <p className="muted small">
+            Aufgaben mit Tag (ohne Uhrzeit) stehen in Google unter <b>Aufgaben › Organizer</b> – in der Google-Kalender-App am jeweiligen Tag. Abhaken, Umbenennen und Verschieben dort
+            kommt zurück in die App; neue Aufgaben in dieser Liste landen in „Unsortiert“. Bekommt eine Aufgabe eine Uhrzeit, wird sie stattdessen ein Termin.
+          </p>
+          {tasks.problem && <p className="small" style={{ color: 'var(--danger)', margin: 0 }}>Letzter Fehler: {tasks.problem}</p>}
+          <div>
+            <button
+              className={`btn sm danger ${confirm ? 'confirm' : 'ghost'}`}
+              disabled={busy}
+              onClick={() => {
+                if (!confirm) {
+                  setConfirm(true)
+                  setTimeout(() => setConfirm(false), 3500)
+                } else void run(false)
+              }}
+            >
+              {confirm ? 'Liste „Organizer“ in Google entfernen?' : 'Ausschalten'}
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p>Aufgaben mit Tag (ohne Uhrzeit) als Google Aufgaben in einer eigenen Liste „Organizer“ – mit Häkchen im Google Kalender.</p>
+          <div>
+            <button className="btn primary" disabled={busy} onClick={() => void run(true)}>
+              Einschalten
+            </button>
+          </div>
+        </>
+      )}
+    </div>
   )
 }
 

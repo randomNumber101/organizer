@@ -75,6 +75,7 @@ export function newTaskFrom(body: NewTaskBody, ts: string): Task {
     blocked_by: [],
     num: null,
     estimate: null,
+    gtask_id: null,
     created_at: ts,
     updated_at: ts,
     ...body,

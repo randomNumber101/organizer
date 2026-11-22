@@ -28,18 +28,19 @@
   <ul>
     <li>Aufgaben, Listen, Notizen, Tags und Termine, die in der App angelegt werden.</li>
     <li>Ein Anmelde-Cookie, damit man angemeldet bleibt (nur technisch notwendig).</li>
-    <li>Bei verbundenem Google Kalender: die Zugangsschlüssel von Google (OAuth-Tokens) und die Zuordnung zwischen Aufgaben und Kalenderterminen.</li>
+    <li>Bei verbundenem Google-Konto: die Zugangsschlüssel von Google (OAuth-Tokens) und die Zuordnung zwischen Aufgaben und Kalenderterminen bzw. Google Aufgaben.</li>
   </ul>
   <p>Die Daten liegen bei Cloudflare (Cloudflare Workers / Durable Objects), über die die App betrieben wird. Sie werden nicht verkauft und nicht an Dritte weitergegeben.</p>
 
-  <h2>Google Kalender</h2>
-  <p>Wenn der Google Kalender verbunden wird, nutzt die App folgende Berechtigungen:</p>
+  <h2>Google Kalender und Google Aufgaben</h2>
+  <p>Wenn das Google-Konto verbunden wird, nutzt die App folgende Berechtigungen:</p>
   <ul>
     <li><b>Kalender lesen</b> (<code>calendar.readonly</code>): Termine werden in der App angezeigt (Tages- und Wochenansicht). Sie werden nur kurzzeitig zwischengespeichert und nicht dauerhaft kopiert.</li>
     <li><b>Eigenen Kalender anlegen und bearbeiten</b> (<code>calendar.app.created</code>): Die App legt einen eigenen Kalender „Organizer“ an und trägt dort Aufgaben mit Uhrzeit ein. Andere Kalender werden nicht verändert.</li>
+    <li><b>Google Aufgaben</b> (<code>tasks</code>): Die App legt eine eigene Aufgabenliste „Organizer“ an, trägt dort Aufgaben mit Tag (ohne Uhrzeit) ein und übernimmt Änderungen aus dieser Liste. Von anderen Aufgabenlisten wird nur der Name gelesen (um die Liste „Organizer“ wiederzufinden); ihre Aufgaben werden weder gelesen noch verändert.</li>
   </ul>
   <p>Die Nutzung von Informationen, die über Google-APIs empfangen werden, entspricht der <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, einschließlich der Anforderungen an die eingeschränkte Nutzung (Limited Use).</p>
-  <p lang="en" class="muted">Organizer's use and transfer of information received from Google APIs adheres to the Google API Services User Data Policy, including the Limited Use requirements. Google user data is only used to show calendar events inside the app and to keep the app's own "Organizer" calendar in sync. It is not shared, sold, or used for advertising or AI training.</p>
+  <p lang="en" class="muted">Organizer's use and transfer of information received from Google APIs adheres to the Google API Services User Data Policy, including the Limited Use requirements. Google user data is only used to show calendar events inside the app and to keep the app's own "Organizer" calendar and "Organizer" task list in sync. It is not shared, sold, or used for advertising or AI training.</p>
 
   <h2>Löschen</h2>
   <p>Die Verbindung zu Google lässt sich jederzeit in der App unter Einstellungen → „Verbindung trennen“ beenden; dabei wird der Zugang bei Google widerrufen und die gespeicherten Schlüssel werden gelöscht. Zusätzlich kann der Zugriff unter <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a> entzogen werden. Gelöschte Aufgaben werden nach 30 Tagen endgültig entfernt.</p>
