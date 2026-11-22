@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { motion } from 'motion/react'
-import { CalendarDays, Columns3, Search, Settings, Sun, X } from 'lucide-react'
+import { AnimatePresence, motion } from 'motion/react'
+import { CalendarDays, CloudOff, Columns3, Command, RefreshCw, Search, Settings, Sun, X } from 'lucide-react'
 import { useStore } from '../store'
 import type { ViewName } from '../lib/types'
 import { dayLabel, todayStr } from '../lib/dates'
@@ -37,12 +37,58 @@ export function TopBar() {
       </div>
       <span className="grow" />
       <SearchBox open={searchOpen} setOpen={setSearchOpen} />
-      <span className={`live-dot desktop-only ${connected ? 'on' : ''}`} title={connected ? 'Live-Sync aktiv' : 'Keine Live-Verbindung'} />
+      <SyncStatus connected={connected} />
+      <button className="icon-btn" aria-label="Befehle (Strg+K)" title="Befehle  (Strg+K)" onClick={() => useStore.getState().setPalette(true)}>
+        <Command size={18} />
+      </button>
       <button className="icon-btn g-btn" aria-label="Einstellungen" onClick={() => setSettings(true)}>
         <Settings size={18} />
         {gColor && <span className="badge" style={{ background: gColor }} />}
       </button>
     </header>
+  )
+}
+
+/** Live-Punkt – oder Hinweis, dass Änderungen noch auf dem Gerät warten */
+function SyncStatus({ connected }: { connected: boolean }) {
+  const offline = useStore((s) => s.offline)
+  const pending = useStore((s) => s.pending)
+  const retryNow = useStore((s) => s.retryNow)
+  // „Speichert“ nur zeigen, wenn es spürbar dauert – sonst flackert es bei jedem Klick
+  const [slow, setSlow] = useState(false)
+  useEffect(() => {
+    if (pending === 0) return setSlow(false)
+    const t = setTimeout(() => setSlow(true), 1500)
+    return () => clearTimeout(t)
+  }, [pending > 0]) // eslint-disable-line react-hooks/exhaustive-deps
+  const state = offline ? 'offline' : pending > 0 && slow ? 'saving' : 'ok'
+  return (
+    <AnimatePresence mode="wait" initial={false}>
+      {state === 'ok' ? (
+        <motion.span
+          key="ok"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className={`live-dot desktop-only ${connected ? 'on' : ''}`}
+          title={connected ? 'Live-Sync aktiv' : 'Keine Live-Verbindung'}
+        />
+      ) : (
+        <motion.button
+          key={state}
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={{ opacity: 0, scale: 0.9 }}
+          className={`sync-pill ${state}`}
+          onClick={retryNow}
+          title={state === 'offline' ? `Offline – ${pending} Änderung(en) warten und werden automatisch übertragen. Tippen zum erneut Versuchen.` : 'Wird gespeichert …'}
+        >
+          {state === 'offline' ? <CloudOff size={14} /> : <RefreshCw size={13} className="spin" />}
+          <span>{state === 'offline' ? 'Offline' : 'Speichert'}</span>
+          {pending > 0 && <b>{pending}</b>}
+        </motion.button>
+      )}
+    </AnimatePresence>
   )
 }
 

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useDroppable } from '@dnd-kit/core'
 import { AnimatePresence, motion } from 'motion/react'
-import { ChevronLeft, ChevronRight, ChevronDown } from 'lucide-react'
+import { ChevronLeft, ChevronRight, ChevronDown, Sun, Moon } from 'lucide-react'
 import { useStore, eventsFor } from '../store'
 import type { Task } from '../lib/types'
 import { addDaysStr, dayNum, daysFrom, longDayLabel, todayStr, weekStart, weekdayShort, dayLabel } from '../lib/dates'
@@ -12,6 +12,9 @@ import Timeline from '../components/Timeline'
 import DraggableCard from '../components/DraggableCard'
 import QuickLine from '../components/QuickLine'
 import { TaskCard } from '../components/TaskCard'
+import { RitualBanner } from '../components/Ritual'
+import { FilterBar } from '../components/FilterBar'
+import { matchesFilter } from '../lib/filter'
 
 const localDay = (iso: string) => {
   const d = new Date(iso)
@@ -25,18 +28,24 @@ export default function PlannerView() {
   const focusDay = useStore((s) => s.focusDay)
   const tasks = useStore((s) => s.tasks)
   const search = useStore((s) => s.search)
+  const filter = useStore((s) => s.filter)
   const today = todayStr()
   const hourPx = isMobile ? 60 : 56
 
-  const { overdue, toPlan, planned, doneDay } = useMemo(() => {
-    const all = Object.values(tasks).filter((t) => matchesSearch(t, search))
+  const { overdue, toPlan, planned, doneDay, deadlines } = useMemo(() => {
+    const all = Object.values(tasks).filter((t) => matchesSearch(t, search) && matchesFilter(t, filter, tasks, today))
+    const week = addDaysStr(focusDay, 7)
     return {
+      // Fristen der nächsten 7 Tage, die nicht ohnehin schon für diesen Tag dran sind
+      deadlines: all
+        .filter((t) => t.status === 'open' && t.deadline && t.deadline.slice(0, 10) <= week && t.due_date !== focusDay && !(focusDay === today && t.due_date && t.due_date < today))
+        .sort((a, b) => a.deadline!.localeCompare(b.deadline!) || byPrio(a, b)),
       overdue: focusDay === today ? all.filter((t) => t.status === 'open' && t.due_date && t.due_date < today).sort(byPrio) : [],
       toPlan: all.filter((t) => t.status === 'open' && t.due_date === focusDay && !t.start_at).sort(byPrio),
       planned: all.filter((t) => t.start_at && localDay(t.start_at) === focusDay).sort((a, b) => a.start_at!.localeCompare(b.start_at!)),
       doneDay: all.filter((t) => t.status === 'done' && !t.start_at && t.due_date === focusDay),
     }
-  }, [tasks, search, focusDay, today])
+  }, [tasks, search, filter, focusDay, today])
 
   return (
     <div className="view">
@@ -44,10 +53,11 @@ export default function PlannerView() {
         {isMobile ? (
           <>
             <div className="planner-mobile-head">
+              <RitualBanner />
               <DayStrip />
             </div>
             <Timeline days={[focusDay]} hourPx={hourPx} showHeader={false} allDayTasks={false} />
-            <PlanTray tasks={[...overdue, ...toPlan]} day={focusDay} />
+            <PlanTray tasks={[...overdue, ...toPlan]} deadlines={deadlines} day={focusDay} />
           </>
         ) : (
           <div className="planner">
@@ -55,13 +65,16 @@ export default function PlannerView() {
               <div className="agenda-head">
                 <DayHeader count={toPlan.length + overdue.length} planned={planned.length} />
                 <DayStrip />
+                <FilterBar />
               </div>
               <div className="agenda-body">
+                <RitualBanner />
                 {overdue.length > 0 && <AgendaSection title="Überfällig" late tasks={overdue} showDate />}
                 <AgendaSection title="Zu planen" dropId={`unplan:${focusDay}`} tasks={toPlan} empty="Hierher ziehen, um die Uhrzeit zu entfernen">
                   <QuickLine defaults={{ due_date: focusDay }} placeholder={focusDay === today ? 'Aufgabe für heute' : `Aufgabe für ${dayLabel(focusDay)}`} />
                 </AgendaSection>
                 {planned.length > 0 && <AgendaSection title="Im Kalender" tasks={planned} />}
+                {deadlines.length > 0 && <AgendaSection title="Fristen bald" tasks={deadlines} showDate />}
                 {doneDay.length > 0 && <DoneSection tasks={doneDay} />}
               </div>
             </aside>
@@ -76,6 +89,7 @@ export default function PlannerView() {
 function DayHeader({ count, planned }: { count: number; planned: number }) {
   const focusDay = useStore((s) => s.focusDay)
   const setFocusDay = useStore((s) => s.setFocusDay)
+  const openRitual = useStore((s) => s.openRitual)
   const events = useStore((s) => s.events)
   const today = todayStr()
   const evCount = eventsFor(events, focusDay, focusDay).filter((e) => (e.allDay ? e.start <= focusDay && focusDay < e.end : localDay(e.start) === focusDay)).length
@@ -88,6 +102,16 @@ function DayHeader({ count, planned }: { count: number; planned: number }) {
           {title}
         </motion.h1>
         <span style={{ flex: 1 }} />
+        {focusDay === today && (
+          <>
+            <button className="icon-btn sm" aria-label="Tag planen" title="Tag planen" onClick={() => openRitual('plan')}>
+              <Sun size={16} />
+            </button>
+            <button className="icon-btn sm" aria-label="Tag abschließen" title="Tag abschließen" onClick={() => openRitual('review')}>
+              <Moon size={16} />
+            </button>
+          </>
+        )}
         <button className="icon-btn sm" aria-label="Vorheriger Tag" onClick={() => setFocusDay(addDaysStr(focusDay, -1))}>
           <ChevronLeft size={17} />
         </button>
@@ -180,7 +204,7 @@ function DoneSection({ tasks }: { tasks: Task[] }) {
 }
 
 /** Handy: Leiste mit Aufgaben des Tages, die man ins Raster ziehen kann */
-function PlanTray({ tasks, day }: { tasks: Task[]; day: string }) {
+function PlanTray({ tasks, deadlines, day }: { tasks: Task[]; deadlines: Task[]; day: string }) {
   const [open, setOpen] = useState(true)
   const { setNodeRef, isOver } = useDroppable({ id: `unplan:${day}` })
   return (
@@ -195,6 +219,10 @@ function PlanTray({ tasks, day }: { tasks: Task[]; day: string }) {
           {tasks.length === 0 && <span className="muted small" style={{ padding: '6px 0' }}>Nichts mehr offen – lange drücken & ziehen, um Aufgaben einzuplanen.</span>}
           {tasks.map((t) => (
             <DraggableCard key={t.id} task={t} showDate={t.due_date !== day} />
+          ))}
+          {deadlines.length > 0 && <div className="tray-label">Fristen bald</div>}
+          {deadlines.map((t) => (
+            <DraggableCard key={t.id} task={t} showDate />
           ))}
         </div>
       )}

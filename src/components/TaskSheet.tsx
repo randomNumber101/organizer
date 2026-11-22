@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion, useDragControls } from 'motion/react'
-import { CalendarDays, Clock, Flag, Folder, Hash, Mountain, Repeat, Trash2, X, CornerLeftUp, CalendarCheck2 } from 'lucide-react'
+import { CalendarDays, Clock, Flag, Folder, Hash, Mountain, Repeat, Trash2, X, CornerLeftUp, CalendarCheck2, Lock, Plus, Hourglass, LayoutTemplate, Link2 } from 'lucide-react'
 import { useStore } from '../store'
-import type { Horizon, Priority } from '../lib/types'
-import { HORIZON_LABEL, PRIORITY_LABEL } from '../lib/types'
+import type { Horizon, Priority, TaskPatch } from '../lib/types'
+import { HORIZON_LABEL, LIST_COLORS, PRIORITY_LABEL } from '../lib/types'
 import { addDaysStr, durationLabel, isoFromDayMinutes, minutesBetween, minutesOfDay, nextWeekdayStr, todayStr, hhmm } from '../lib/dates'
-import { ancestors, childrenOf } from '../lib/tree'
+import { ancestors, childrenOf, descendantIds } from '../lib/tree'
+import { dependents, wouldCycle } from '../lib/blocking'
+import { deadlineDay, deadlineState, deadlineTime } from '../lib/filter'
+import TaskPicker from './TaskPicker'
+import SmartField, { TokenChips, type SmartFieldHandle } from './SmartField'
+import { applyToTask, composeTask } from '../lib/compose'
 import { PRESET_LABEL, PRESET_RRULE, presetOf, repeatLabel, type RepeatPreset } from '../../shared/recurrence'
 import { useIsMobile } from '../hooks/useMedia'
 import Check from './Check'
@@ -65,13 +70,15 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
   const task = useStore((s) => s.tasks[id])
   const tasks = useStore((s) => s.tasks)
   const lists = useStore((s) => s.lists)
-  const { updateTask, toggleDone, deleteTask, select, createTask, moveToDay } = useStore.getState()
+  const { updateTask, toggleDone, deleteTask, select, createTask, createList, moveToDay, setBlockers, saveAsTemplate, showToast } = useStore.getState()
   const [title, setTitle] = useState(task?.title ?? '')
   const [notes, setNotes] = useState(task?.notes ?? '')
   const [tagInput, setTagInput] = useState('')
   const [subInput, setSubInput] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const titleRef = useRef<HTMLTextAreaElement>(null)
+  const [picking, setPicking] = useState(false)
+  const [tplName, setTplName] = useState<string | null>(null)
+  const titleRef = useRef<SmartFieldHandle>(null)
 
   useEffect(() => {
     if (!task) return
@@ -80,20 +87,34 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
   }, [task?.title, task?.notes]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const allTags = useMemo(() => [...new Set(Object.values(tasks).flatMap((t) => t.tags))].sort(), [tasks])
+  const titleParse = useMemo(() => (task && title.trim() && title.trim() !== task.title ? applyToTask(task, title, lists, tasks) : null), [task, title, lists, tasks])
+  const subParse = useMemo(() => composeTask(subInput, {}, lists, tasks), [subInput, lists, tasks])
 
   if (!task) return null
   const kids = childrenOf(tasks, id)
   const parents = ancestors(tasks, task)
   const today = todayStr()
-  const duration = task.start_at && task.end_at ? minutesBetween(task.start_at, task.end_at) : 60
+  const duration = task.start_at && task.end_at ? minutesBetween(task.start_at, task.end_at) : (task.estimate ?? 60)
   const preset = presetOf(task.rrule)
   const doneKids = kids.filter((k) => k.status === 'done').length
   const sortedLists = Object.values(lists).sort((a, b) => a.sort - b.sort)
+  const blockers = (task.blocked_by ?? []).map((b) => tasks[b]).filter(Boolean)
+  const holding = dependents(tasks, id).filter((d) => d.status === 'open')
+  const family = new Set([...descendantIds(tasks, id), ...parents.map((p) => p.id)])
+  const dl = task.deadline ? deadlineState(task.deadline, today) : null
 
   const saveTitle = () => {
     const t = title.trim()
-    if (t && t !== task.title) void updateTask(id, { title: t })
-    else setTitle(task.title)
+    if (!t || t === task.title) return setTitle(task.title)
+    const a = applyToTask(task, t, lists, tasks)
+    if (!a.parsed.tokens.length) return updateTask(id, { title: t })
+    const patch = { ...a.patch }
+    if (a.newListName) patch.list_id = createList(a.newListName, LIST_COLORS[Object.keys(lists).length % LIST_COLORS.length]).id
+    // vorherigen Stand merken, damit „Rückgängig“ alles zurückholt
+    const prev = Object.fromEntries(Object.keys(patch).map((k) => [k, task[k as keyof typeof task]])) as TaskPatch
+    updateTask(id, patch)
+    setTitle(patch.title ?? task.title)
+    showToast(`Erkannt: ${a.labels.join(' · ')}`, 'info', () => updateTask(id, prev))
   }
   const saveNotes = () => {
     const n = notes.trim() ? notes : null
@@ -119,9 +140,9 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
     setTagInput('')
   }
   const addSub = () => {
-    const t = subInput.trim()
-    if (!t) return
-    void createTask({ title: t, parent_id: id, list_id: task.list_id, horizon: task.horizon })
+    const c = composeTask(subInput, { parent_id: id, list_id: task.list_id, horizon: task.horizon }, lists, tasks)
+    if (!c.patch.title) return
+    createTask({ ...c.patch, parent_id: c.patch.parent_id ?? id })
     setSubInput('')
   }
 
@@ -152,22 +173,30 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
       <div className="sheet-body">
         <div className="title-row">
           <Check done={task.status === 'done'} priority={task.priority} size="big" onToggle={() => void toggleDone(id)} />
-          <textarea
+          <SmartField
             id="sheet-title"
             ref={titleRef}
-            className="title-input"
-            rows={1}
+            className="title-field"
             value={title}
-            onChange={(e) => setTitle(e.target.value.replace(/\n/g, ''))}
+            onChange={setTitle}
+            tokens={titleParse?.parsed.tokens ?? []}
+            self={id}
+            ariaLabel="Titel"
             onBlur={saveTitle}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                ;(e.target as HTMLTextAreaElement).blur()
-              }
+            onSubmit={() => titleRef.current?.blur()}
+            onCancel={() => {
+              setTitle(task.title)
+              requestAnimationFrame(() => titleRef.current?.blur())
             }}
           />
+          {task.num !== null && <span className="sheet-num" title={`Nummer – z. B. für „warte auf ${task.num}“`}>{task.num}</span>}
         </div>
+        {titleParse && titleParse.parsed.tokens.length > 0 && (
+          <div className="hint title-hint">
+            <TokenChips tokens={titleParse.parsed.tokens} />
+            <span className="muted small">Enter übernimmt</span>
+          </div>
+        )}
         {task.rollover_count > 0 && task.status === 'open' && <p className="chip warn" style={{ alignSelf: 'flex-start', height: 24 }}>Schon {task.rollover_count}× auf den nächsten Tag geschoben</p>}
 
         <div className="props">
@@ -204,6 +233,43 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
           </div>
 
           <span className="prop-label">
+            <Hourglass /> Frist
+          </span>
+          <div className="prop-value">
+            <input
+              type="date"
+              value={task.deadline ? deadlineDay(task.deadline) : ''}
+              onChange={(e) => {
+                const d = e.target.value
+                const t = task.deadline ? deadlineTime(task.deadline) : null
+                updateTask(id, { deadline: d ? (t ? `${d}T${t}` : d) : null })
+              }}
+              aria-label="Frist wählen"
+            />
+            {task.deadline && (
+              <input
+                type="time"
+                step={900}
+                value={deadlineTime(task.deadline) ?? ''}
+                onChange={(e) => updateTask(id, { deadline: e.target.value ? `${deadlineDay(task.deadline!)}T${e.target.value}` : deadlineDay(task.deadline!) })}
+                aria-label="Uhrzeit der Frist"
+              />
+            )}
+            {task.deadline ? (
+              <>
+                <span className={`chip deadline ${dl}`}>
+                  {dl === 'overdue' ? 'abgelaufen' : dl === 'today' ? 'heute' : `noch ${Math.round((Date.parse(deadlineDay(task.deadline)) - Date.parse(today)) / 86_400_000)} Tage`}
+                </span>
+                <button className="opt" onClick={() => void updateTask(id, { deadline: null })} aria-label="Frist entfernen">
+                  <X />
+                </button>
+              </>
+            ) : (
+              <span className="muted small">Bis wann muss es spätestens fertig sein?</span>
+            )}
+          </div>
+
+          <span className="prop-label">
             <Clock /> Uhrzeit
           </span>
           <div className="prop-value">
@@ -223,7 +289,18 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
                 </button>
               </>
             )}
-            {!task.start_at && <span className="muted small">Oder im Kalender an eine Stelle ziehen</span>}
+            {!task.start_at && (
+              <select value={task.estimate ?? ''} onChange={(e) => updateTask(id, { estimate: e.target.value ? Number(e.target.value) : null })} aria-label="Geschätzte Dauer">
+                <option value="">Dauer?</option>
+                {!DURATIONS.includes(task.estimate ?? 0) && task.estimate && <option value={task.estimate}>~{durationLabel(task.estimate)}</option>}
+                {DURATIONS.map((d) => (
+                  <option key={d} value={d}>
+                    ~{durationLabel(d)}
+                  </option>
+                ))}
+              </select>
+            )}
+            {!task.start_at && <span className="muted small">oder im Kalender an eine Stelle ziehen</span>}
             {task.gcal_event_id && (
               <span className="chip time" title="Steht in deinem Google Kalender „Organizer“">
                 <CalendarCheck2 /> in Google
@@ -348,20 +425,86 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
             </AnimatePresence>
             <div className="add-sub">
               <span className="check small" style={{ borderStyle: 'dashed' }} />
-              <input
-                placeholder="Unteraufgabe hinzufügen"
-                value={subInput}
-                onChange={(e) => setSubInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') addSub()
-                }}
-              />
+              <SmartField value={subInput} onChange={setSubInput} tokens={subParse.parsed.tokens} placeholder="Unteraufgabe hinzufügen" onSubmit={addSub} onCancel={() => setSubInput('')} className="sub-field" self={id} />
             </div>
+            {subParse.parsed.tokens.length > 0 && (
+              <div className="hint" style={{ paddingLeft: 34 }}>
+                <TokenChips tokens={subParse.parsed.tokens} />
+              </div>
+            )}
           </div>
         </div>
 
+        <div>
+          <div className="section-label">
+            <Lock size={13} /> Wartet auf
+            {blockers.length > 0 && <span>{blockers.filter((b) => b.status === 'done').length}/{blockers.length} erledigt</span>}
+          </div>
+          <div className="subtasks">
+            <AnimatePresence initial={false}>
+              {blockers.map((b) => (
+                <motion.div key={b.id} layout="position" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className={`subtask blocker ${b.status === 'done' ? 'done' : ''}`}>
+                  <Check done={b.status === 'done'} priority={b.priority} onToggle={() => void toggleDone(b.id)} />
+                  <button className="s-title" onClick={() => select(b.id)}>
+                    {b.title}
+                  </button>
+                  <button className="icon-btn sm" aria-label={`„${b.title}“ nicht mehr abwarten`} onClick={() => setBlockers(id, task.blocked_by.filter((x) => x !== b.id))}>
+                    <X size={14} />
+                  </button>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+            <div style={{ position: 'relative' }}>
+              {picking ? (
+                <TaskPicker
+                  placeholder="Auf welche Aufgabe wartet das hier?"
+                  exclude={(t) => t.id === id || family.has(t.id) || task.blocked_by.includes(t.id) || wouldCycle(tasks, id, t.id)}
+                  onPick={(t) => setBlockers(id, [...task.blocked_by, t.id])}
+                  onClose={() => setPicking(false)}
+                />
+              ) : (
+                <button className="add-link" onClick={() => setPicking(true)}>
+                  <Plus size={15} /> Aufgabe auswählen
+                </button>
+              )}
+            </div>
+            {blockers.length === 0 && !picking && <p className="muted small" style={{ margin: '2px 0 0' }}>Solange eine gewählte Aufgabe offen ist, gilt diese als blockiert.</p>}
+          </div>
+          {holding.length > 0 && (
+            <div className="holding">
+              <Link2 size={13} /> Hält auf:
+              {holding.map((h) => (
+                <button key={h.id} className="chip" onClick={() => select(h.id)}>
+                  {h.title}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         <div className="sheet-foot">
-          <span>Erstellt {new Date(task.created_at).toLocaleDateString('de-DE', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+          {tplName !== null ? (
+            <form
+              className="tpl-form"
+              onSubmit={(e) => {
+                e.preventDefault()
+                saveAsTemplate(id, tplName || task.title)
+                setTplName(null)
+              }}
+            >
+              <input autoFocus className="field-input sm" value={tplName} placeholder={task.title} onChange={(e) => setTplName(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && setTplName(null)} aria-label="Name der Vorlage" />
+              <button className="btn sm" type="submit">
+                Speichern
+              </button>
+            </form>
+          ) : (
+            <>
+              <span>Erstellt {new Date(task.created_at).toLocaleDateString('de-DE', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+              <button className="btn sm ghost" onClick={() => setTplName('')} title="Diese Aufgabe samt Unteraufgaben als Vorlage speichern">
+                <LayoutTemplate size={15} /> Als Vorlage
+              </button>
+            </>
+          )}
           <button
             className={`btn sm danger ${confirmDelete ? 'confirm' : 'ghost'}`}
             onClick={() => {

@@ -23,7 +23,7 @@ import {
 import { SortableContext, arrayMove, horizontalListSortingStrategy, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { AnimatePresence, motion } from 'motion/react'
-import { ChevronRight, Columns3, Inbox, LayoutList, MoreHorizontal, Pencil, Plus, Shuffle, Trash2 } from 'lucide-react'
+import { ChevronRight, Columns3, Inbox, LayoutList, LayoutTemplate, ListChecks, MoreHorizontal, Pencil, Plus, Shuffle, Trash2 } from 'lucide-react'
 import { useStore } from '../store'
 import type { BoardMode, List, Task, TaskPatch } from '../lib/types'
 import { LIST_COLORS } from '../lib/types'
@@ -35,6 +35,9 @@ import { markDragEnd } from '../lib/drag'
 import { moveBlockToDate } from '../../shared/tz'
 import { TaskCard } from '../components/TaskCard'
 import Segmented from '../components/Segmented'
+import { FilterBar } from '../components/FilterBar'
+import SmartField, { TokenChips } from '../components/SmartField'
+import { matchesFilter } from '../lib/filter'
 
 // ---------------------------------------------------------------------------
 // Spalten
@@ -69,9 +72,11 @@ function useColumns(mode: BoardMode): ColumnDef[] {
   const tasks = useStore((s) => s.tasks)
   const lists = useStore((s) => s.lists)
   const search = useStore((s) => s.search)
+  const filter = useStore((s) => s.filter)
 
   return useMemo(() => {
-    const all = Object.values(tasks).filter((t) => matchesSearch(t, search))
+    const today = todayStr()
+    const all = Object.values(tasks).filter((t) => matchesSearch(t, search) && matchesFilter(t, filter, tasks, today))
     const top = all.filter((t) => !t.parent_id)
     if (mode === 'lists') {
       const sorted = Object.values(lists)
@@ -107,7 +112,6 @@ function useColumns(mode: BoardMode): ColumnDef[] {
     }
 
     // Wochenplanung: ohne Datum + die nächsten 7 Tage
-    const today = todayStr()
     const dated = all.filter((t) => t.due_date)
     const cols: ColumnDef[] = [
       {
@@ -139,7 +143,7 @@ function useColumns(mode: BoardMode): ColumnDef[] {
       })
     }
     return cols
-  }, [tasks, lists, search, mode])
+  }, [tasks, lists, search, filter, mode])
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +158,8 @@ export default function BoardView() {
   const updateTask = useStore((s) => s.updateTask)
   const updateList = useStore((s) => s.updateList)
   const setDragging = useStore((s) => s.setDragging)
+  const showSubtasks = useStore((s) => s.showSubtasks)
+  const setShowSubtasks = useStore((s) => s.setShowSubtasks)
   const columns = useColumns(mode)
 
   const [items, setItems] = useState<Record<string, string[]> | null>(null)
@@ -295,7 +301,17 @@ export default function BoardView() {
     <div className="view">
       <div className="board-toolbar">
         <h1 className="board-title">{mode === 'lists' ? 'Board' : 'Diese Woche'}</h1>
+        <FilterBar />
         <span className="grow" style={{ flex: 1 }} />
+        <button
+          className={`icon-btn sub-toggle ${showSubtasks ? 'on' : ''}`}
+          aria-pressed={showSubtasks}
+          aria-label={showSubtasks ? 'Unteraufgaben auf Karten ausblenden' : 'Unteraufgaben auf Karten zeigen'}
+          title={showSubtasks ? 'Unteraufgaben ausblenden' : 'Unteraufgaben zeigen'}
+          onClick={() => setShowSubtasks(!showSubtasks)}
+        >
+          <ListChecks size={18} />
+        </button>
         <Segmented
           group="board-mode"
           value={mode}
@@ -382,6 +398,7 @@ function Column({ col, ids, dragging, unsortedCount }: { col: ColumnDef; ids: st
       style={style}
       className={`col ${col.kind === 'inbox' ? 'inbox' : ''} ${isOver ? 'over' : ''} ${sortable.isDragging ? 'col-dragging' : ''}`}
       aria-label={col.title}
+      data-col={col.id}
     >
       <header className="col-head" {...(col.kind === 'list' ? { ...sortable.attributes, ...sortable.listeners } : {})}>
         {col.kind === 'inbox' && <Inbox size={16} style={{ color: 'var(--amber)' }} />}
@@ -470,52 +487,40 @@ function SortableCard({ task, col }: { task: Task; col: ColumnDef }) {
 // ---------------------------------------------------------------------------
 function InlineAdd({ col, topSortValue, onClose }: { col: ColumnDef; topSortValue: number; onClose: () => void }) {
   const lists = useStore((s) => s.lists)
+  const tasks = useStore((s) => s.tasks)
   const createTask = useStore((s) => s.createTask)
   const createList = useStore((s) => s.createList)
   const [text, setText] = useState('')
   const sortRef = useRef(topSortValue)
-  const c = composeTask(text, col.defaults, lists)
+  const c = useMemo(() => composeTask(text, col.defaults, lists, tasks), [text, col.defaults, lists, tasks])
 
-  const submit = async () => {
+  const submit = () => {
     if (!c.patch.title) return
     let list_id = c.patch.list_id
-    if (c.newListName) list_id = (await createList(c.newListName, LIST_COLORS[Object.keys(lists).length % LIST_COLORS.length]))?.id ?? null
+    if (c.newListName) list_id = createList(c.newListName, LIST_COLORS[Object.keys(lists).length % LIST_COLORS.length]).id
     sortRef.current -= 1
-    void createTask({ ...c.patch, list_id, sort: sortRef.current })
+    createTask({ ...c.patch, list_id, sort: sortRef.current })
     setText('')
   }
 
   return (
     <div className="inline-add" style={{ marginBottom: 6 }}>
-      <textarea
+      <SmartField
         autoFocus
-        rows={1}
         value={text}
+        onChange={setText}
+        tokens={c.parsed.tokens}
         placeholder="Was steht an?"
-        enterKeyHint="done"
-        onChange={(e) => setText(e.target.value.replace(/\n/g, ''))}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault()
-            void submit()
-          }
-          if (e.key === 'Escape') onClose()
-        }}
+        onSubmit={submit}
+        onCancel={onClose}
         onBlur={() => {
           if (!text.trim()) onClose()
         }}
+        className="inline-field"
       />
-      {(c.parsed.dueDate || c.parsed.time || c.parsed.priority || c.parsed.tags.length || c.parsed.listName) && (
+      {c.parsed.tokens.length > 0 && (
         <div className="hint">
-          {c.parsed.dueDate && <span className="chip today">{c.parsed.dueDate === todayStr() ? 'Heute' : shortDate(c.parsed.dueDate)}</span>}
-          {c.parsed.time && <span className="chip time">{c.parsed.time}</span>}
-          {c.parsed.priority && <span className="chip">P{c.parsed.priority}</span>}
-          {c.parsed.listName && <span className="chip">@{c.matchedList?.name ?? c.parsed.listName}</span>}
-          {c.parsed.tags.map((t) => (
-            <span key={t} className="chip tag">
-              #{t}
-            </span>
-          ))}
+          <TokenChips tokens={c.parsed.tokens} />
         </div>
       )}
     </div>
@@ -549,6 +554,7 @@ function RenameInput({ list, onDone }: { list: List; onDone: () => void }) {
 
 function ColumnMenu({ list, onRename }: { list: List; onRename: () => void }) {
   const updateList = useStore((s) => s.updateList)
+  const openTemplatePicker = useStore((s) => s.openTemplatePicker)
   const deleteList = useStore((s) => s.deleteList)
   const [open, setOpen] = useState(false)
   const [confirm, setConfirm] = useState(false)
@@ -588,6 +594,15 @@ function ColumnMenu({ list, onRename }: { list: List; onRename: () => void }) {
               }}
             >
               <Pencil size={15} /> Umbenennen
+            </button>
+            <button
+              className="menu-item"
+              onClick={() => {
+                setOpen(false)
+                openTemplatePicker({ list_id: list.id })
+              }}
+            >
+              <LayoutTemplate size={15} /> Aus Vorlage …
             </button>
             <div className="menu-swatches">
               {LIST_COLORS.map((c) => (

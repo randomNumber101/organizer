@@ -101,7 +101,7 @@ export function PlanDnd({ children, hourPx }: { children: ReactNode; hourPx: num
 
   const durationOf = (taskId: string) => {
     const t = tasks[taskId]
-    return t?.start_at && t.end_at ? Math.max(SNAP, minutesBetween(t.start_at, t.end_at)) : 60
+    return t?.start_at && t.end_at ? Math.max(SNAP, minutesBetween(t.start_at, t.end_at)) : Math.max(SNAP, t?.estimate ?? 60)
   }
 
   const onDragStart = (e: DragStartEvent) => {

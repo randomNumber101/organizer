@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Datenschutz · Organizer</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml" />
+<style>
+  body { margin: 0; background: #f3f1ec; color: #1c1e1b; font: 16px/1.6 system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 48px 22px 80px; }
+  h1 { font: 400 40px/1.1 Georgia, 'Times New Roman', serif; margin: 18px 0 8px; }
+  h2 { font-size: 17px; margin: 30px 0 6px; }
+  p, li { color: #3e413c; }
+  a { color: #2f5d50; }
+  .muted { color: #7a7c76; font-size: 14px; }
+  @media (prefers-color-scheme: dark) { body { background: #131513; color: #e8ebe7; } p, li { color: #c2c6c0; } a { color: #84bba7; } }
+</style>
+</head>
+<body>
+<main>
+  <a href="/"><img src="/icon.svg" alt="Organizer" width="40" height="40" /></a>
+  <h1>Datenschutzerklärung</h1>
+  <p class="muted">Stand: 22. November 2026</p>
+
+  <p>Organizer ist ein privates, nicht-kommerzielles Projekt: eine persönliche Aufgaben- und Planungs-App, die nur von ihrem Betreiber selbst genutzt wird. Es gibt keine Registrierung für andere Personen, keine Werbung, kein Tracking und keine Analyse-Werkzeuge.</p>
+
+  <h2>Welche Daten gespeichert werden</h2>
+  <ul>
+    <li>Aufgaben, Listen, Notizen, Tags und Termine, die in der App angelegt werden.</li>
+    <li>Ein Anmelde-Cookie, damit man angemeldet bleibt (nur technisch notwendig).</li>
+    <li>Bei verbundenem Google Kalender: die Zugangsschlüssel von Google (OAuth-Tokens) und die Zuordnung zwischen Aufgaben und Kalenderterminen.</li>
+  </ul>
+  <p>Die Daten liegen bei Cloudflare (Cloudflare Workers / Durable Objects), über die die App betrieben wird. Sie werden nicht verkauft und nicht an Dritte weitergegeben.</p>
+
+  <h2>Google Kalender</h2>
+  <p>Wenn der Google Kalender verbunden wird, nutzt die App folgende Berechtigungen:</p>
+  <ul>
+    <li><b>Kalender lesen</b> (<code>calendar.readonly</code>): Termine werden in der App angezeigt (Tages- und Wochenansicht). Sie werden nur kurzzeitig zwischengespeichert und nicht dauerhaft kopiert.</li>
+    <li><b>Eigenen Kalender anlegen und bearbeiten</b> (<code>calendar.app.created</code>): Die App legt einen eigenen Kalender „Organizer“ an und trägt dort Aufgaben mit Uhrzeit ein. Andere Kalender werden nicht verändert.</li>
+  </ul>
+  <p>Die Nutzung von Informationen, die über Google-APIs empfangen werden, entspricht der <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, einschließlich der Anforderungen an die eingeschränkte Nutzung (Limited Use).</p>
+  <p lang="en" class="muted">Organizer's use and transfer of information received from Google APIs adheres to the Google API Services User Data Policy, including the Limited Use requirements. Google user data is only used to show calendar events inside the app and to keep the app's own "Organizer" calendar in sync. It is not shared, sold, or used for advertising or AI training.</p>
+
+  <h2>Löschen</h2>
+  <p>Die Verbindung zu Google lässt sich jederzeit in der App unter Einstellungen → „Verbindung trennen“ beenden; dabei wird der Zugang bei Google widerrufen und die gespeicherten Schlüssel werden gelöscht. Zusätzlich kann der Zugriff unter <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a> entzogen werden. Gelöschte Aufgaben werden nach 30 Tagen endgültig entfernt.</p>
+
+  <h2>Kontakt</h2>
+  <p>Bei Fragen zum Datenschutz: über die Support-E-Mail-Adresse, die bei der Google-Anmeldung angezeigt wird.</p>
+
+  <p class="muted"><a href="/">Zur App</a> · <a href="/nutzungsbedingungen">Nutzungsbedingungen</a></p>
+</main>
+</body>
+</html>

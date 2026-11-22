@@ -26,6 +26,18 @@ export default defineConfig({
         display: 'standalone',
         background_color: '#f6f5f2',
         theme_color: '#2f5d50',
+        // Android: „Teilen“ → Organizer legt eine Aufgabe an
+        share_target: {
+          action: '/share',
+          method: 'GET',
+          params: { title: 'title', text: 'text', url: 'url' },
+        },
+        // Langes Drücken aufs App-Symbol
+        shortcuts: [
+          { name: 'Neue Aufgabe', short_name: 'Neu', url: '/?action=new', icons: [{ src: '/icons/shortcut-new.png', sizes: '96x96', type: 'image/png' }] },
+          { name: 'Tag planen', short_name: 'Planen', url: '/?action=plan', icons: [{ src: '/icons/shortcut-plan.png', sizes: '96x96', type: 'image/png' }] },
+          { name: 'Heute', short_name: 'Heute', url: '/?view=today', icons: [{ src: '/icons/shortcut-today.png', sizes: '96x96', type: 'image/png' }] },
+        ],
         icons: [
           { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
           { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },

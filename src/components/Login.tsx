@@ -36,6 +36,9 @@ export default function Login() {
         <button className="btn primary" disabled={busy}>
           {busy ? 'Einen Moment …' : 'Anmelden'}
         </button>
+        <p className="muted small" style={{ marginTop: 18 }}>
+          <a href="/datenschutz" style={{ color: 'inherit' }}>Datenschutz</a> · <a href="/nutzungsbedingungen" style={{ color: 'inherit' }}>Nutzungsbedingungen</a>
+        </p>
       </motion.form>
     </div>
   )

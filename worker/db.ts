@@ -34,6 +34,10 @@ export type TaskRow = {
   gcal_etag: string | null
   origin_event_id: string | null
   gcal_dirty: number
+  deadline: string | null
+  blocked_by: string
+  num: number | null
+  estimate: number | null
   created_at: string
   updated_at: string
   deleted_at: string | null
@@ -52,15 +56,18 @@ export type ListRow = {
   seq: number
 }
 
-export function taskOut(r: TaskRow) {
-  const { deleted_at: _d, seq: _s, gcal_dirty: _g, tags, ...rest } = r
-  let parsed: string[] = []
+const parseArr = (v: string | null | undefined): string[] => {
   try {
-    parsed = JSON.parse(tags)
+    const a = JSON.parse(v ?? '[]')
+    return Array.isArray(a) ? a : []
   } catch {
-    /* leer lassen */
+    return []
   }
-  return { ...rest, tags: parsed }
+}
+
+export function taskOut(r: TaskRow) {
+  const { deleted_at: _d, seq: _s, gcal_dirty: _g, tags, blocked_by, ...rest } = r
+  return { ...rest, tags: parseArr(tags), blocked_by: parseArr(blocked_by) }
 }
 
 export function listOut(r: ListRow) {
@@ -77,6 +84,9 @@ const COLOR = /^#[0-9a-fA-F]{6}$/
 
 export const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID.test(v)
 export const isDate = (v: unknown): v is string => typeof v === 'string' && DATE.test(v) && !Number.isNaN(Date.parse(v))
+/** Frist: Tag (YYYY-MM-DD) oder Tag mit Uhrzeit in Ortszeit (YYYY-MM-DDTHH:mm) */
+export const isDeadline = (v: unknown): v is string =>
+  isDate(v) || (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$/.test(v) && isDate(v.slice(0, 10)))
 
 function isIso(v: unknown): v is string {
   return typeof v === 'string' && v.length <= 40 && !Number.isNaN(Date.parse(v))
@@ -114,6 +124,9 @@ export type TaskInput = Partial<{
   rrule: string | null
   sort: number
   origin_event_id: string | null
+  deadline: string | null
+  blocked_by: string[]
+  estimate: number | null
 }>
 
 const bad = (msg: string): never => {
@@ -146,6 +159,12 @@ export function cleanTaskInput(body: unknown): TaskInput {
   if ('end_at' in b) out.end_at = b.end_at === null ? null : isIso(b.end_at) ? new Date(b.end_at).toISOString() : bad('Ungültige Endzeit')
   if ('timezone' in b) out.timezone = b.timezone === null ? null : isTimeZone(b.timezone) ? b.timezone : bad('Ungültige Zeitzone')
   if ('rrule' in b) out.rrule = b.rrule === null || b.rrule === '' ? null : typeof b.rrule === 'string' && b.rrule.length <= 200 && isValidRRule(b.rrule) ? b.rrule.toUpperCase() : bad('Ungültige Wiederholung')
+  if ('deadline' in b) out.deadline = b.deadline === null || b.deadline === '' ? null : isDeadline(b.deadline) ? b.deadline : bad('Ungültige Frist')
+  if ('estimate' in b) out.estimate = b.estimate === null ? null : Number.isInteger(b.estimate) && (b.estimate as number) >= 1 && (b.estimate as number) <= 1440 ? (b.estimate as number) : bad('Ungültige Dauer')
+  if ('blocked_by' in b) {
+    const v = Array.isArray(b.blocked_by) ? b.blocked_by : bad('Ungültige Abhängigkeiten')
+    out.blocked_by = v.length <= 20 && v.every(isUuid) ? [...new Set(v as string[])] : bad('Ungültige Abhängigkeiten')
+  }
   if ('origin_event_id' in b) out.origin_event_id = b.origin_event_id === null ? null : typeof b.origin_event_id === 'string' && b.origin_event_id.length <= 1100 ? b.origin_event_id : bad('Ungültiger Termin-Verweis')
   if ('sort' in b) out.sort = typeof b.sort === 'number' && Number.isFinite(b.sort) ? b.sort : bad('Ungültige Sortierung')
   return out

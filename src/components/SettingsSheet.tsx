@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { CalendarDays, Check as CheckIcon, Download, LogOut, RefreshCw, Unplug, X } from 'lucide-react'
+import { Bell, BellOff, CalendarDays, Check as CheckIcon, ChevronRight, Download, LayoutTemplate, LogOut, RefreshCw, Send, Unplug, X } from 'lucide-react'
+import LangHelp from './LangHelp'
 import { useStore } from '../store'
 import { useIsMobile } from '../hooks/useMedia'
+import { api } from '../lib/api'
+import type { PushPrefs } from '../lib/types'
+import { currentSubscription, disablePush, enablePush, isIos, isStandalone, pushSupported } from '../lib/push'
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>
@@ -50,7 +54,9 @@ export default function SettingsSheet() {
               </button>
             </div>
             <div className="sheet-body">
+              <NotifySection />
               <GoogleSection />
+              <OrganizeSection />
               <AppSection />
             </div>
           </motion.aside>
@@ -179,6 +185,176 @@ function GoogleSection() {
   )
 }
 
+const DEFAULT_PUSH: PushPrefs = { morning: '08:00', evening: null, lead: 10 }
+const MORNING = ['06:00', '06:30', '07:00', '07:30', '08:00', '08:30', '09:00', '09:30', '10:00']
+const EVENING = ['17:00', '18:00', '19:00', '20:00', '21:00', '21:30', '22:00']
+
+function NotifySection() {
+  const prefs = useStore((s) => s.prefs.push)
+  const setPref = useStore((s) => s.setPref)
+  const showToast = useStore((s) => s.showToast)
+  const p = { ...DEFAULT_PUSH, ...(prefs ?? {}) }
+  const [state, setState] = useState<'loading' | 'unsupported' | 'off' | 'on' | 'blocked' | 'ios-install'>('loading')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    if (!pushSupported()) {
+      setState(isIos() && !isStandalone() ? 'ios-install' : 'unsupported')
+      return
+    }
+    if (Notification.permission === 'denied') return setState('blocked')
+    void currentSubscription().then((s) => setState(s && Notification.permission === 'granted' ? 'on' : 'off'))
+  }, [])
+
+  const set = (patch: Partial<PushPrefs>) => setPref('push', { ...p, ...patch })
+  const run = async (fn: () => Promise<void>, next: typeof state, ok?: string) => {
+    setBusy(true)
+    try {
+      await fn()
+      setState(next)
+      if (ok) showToast(ok)
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e), 'error')
+      if (typeof Notification !== 'undefined' && Notification.permission === 'denied') setState('blocked')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="settings-sec">
+      <h3>
+        <Bell size={18} /> Erinnerungen
+      </h3>
+      <div className="settings-card">
+        {state === 'ios-install' && <p>Auf dem iPhone gehen Benachrichtigungen nur, wenn die App auf dem Home-Bildschirm installiert ist (Teilen → „Zum Home-Bildschirm“).</p>}
+        {state === 'unsupported' && <p className="muted">Dieser Browser unterstützt keine Push-Benachrichtigungen.</p>}
+        {state === 'blocked' && <p>Benachrichtigungen sind für diese Seite blockiert. Erlaube sie in den Browser- bzw. App-Einstellungen und lade die Seite neu.</p>}
+        {state === 'off' && (
+          <>
+            <p>Lass dich vor Aufgaben mit Uhrzeit erinnern und bekomm morgens eine kurze Übersicht über deinen Tag.</p>
+            <div>
+              <button className="btn primary" disabled={busy} onClick={() => void run(enablePush, 'on', 'Benachrichtigungen sind an')}>
+                <Bell size={15} /> Auf diesem Gerät aktivieren
+              </button>
+            </div>
+          </>
+        )}
+        {state === 'on' && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span className="live-dot on" />
+            <span>Aktiv auf diesem Gerät</span>
+            <span style={{ flex: 1 }} />
+            <button className="btn sm ghost" disabled={busy} onClick={() => void run(async () => void (await api.pushTest()), 'on', 'Test verschickt – kommt gleich')}>
+              <Send size={14} /> Test
+            </button>
+            <button className="btn sm ghost" disabled={busy} onClick={() => void run(disablePush, 'off')}>
+              <BellOff size={14} /> Aus
+            </button>
+          </div>
+        )}
+        {state !== 'loading' && state !== 'unsupported' && (
+          <div className="notify-grid">
+            <label>
+              <span>Vor Aufgaben mit Uhrzeit</span>
+              <select value={p.lead} onChange={(e) => set({ lead: Number(e.target.value) })}>
+                <option value={0}>beim Start</option>
+                {[5, 10, 15, 30, 60].map((m) => (
+                  <option key={m} value={m}>
+                    {m} Min. vorher
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Morgens: Tagesübersicht</span>
+              <select value={p.morning ?? ''} onChange={(e) => set({ morning: e.target.value || null })}>
+                <option value="">aus</option>
+                {MORNING.map((t) => (
+                  <option key={t} value={t}>
+                    {t} Uhr
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Abends: „Tag abschließen?“</span>
+              <select value={p.evening ?? ''} onChange={(e) => set({ evening: e.target.value || null })}>
+                <option value="">aus</option>
+                {EVENING.map((t) => (
+                  <option key={t} value={t}>
+                    {t} Uhr
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+        <p className="muted small">Gilt für alle Geräte, auf denen du Benachrichtigungen aktiviert hast. Solange Push an ist, setzt die App bei Google-Terminen keine eigene Erinnerung mehr – so kommt nichts doppelt.</p>
+      </div>
+    </section>
+  )
+}
+
+function OrganizeSection() {
+  const templates = useStore((s) => s.templates)
+  const showSubtasks = useStore((s) => s.showSubtasks)
+  const setShowSubtasks = useStore((s) => s.setShowSubtasks)
+  const showNums = useStore((s) => s.showNums)
+  const setShowNums = useStore((s) => s.setShowNums)
+  const [help, setHelp] = useState(false)
+  const openTemplatePicker = useStore((s) => s.openTemplatePicker)
+  const setSettings = useStore((s) => s.setSettings)
+  const n = Object.keys(templates).length
+  return (
+    <section className="settings-sec">
+      <h3>
+        <LayoutTemplate size={18} /> Ordnen
+      </h3>
+      <div className="settings-card">
+        <label className="switch-row">
+          <span>
+            Unteraufgaben auf Karten zeigen
+            <span className="muted small"> · Taste U</span>
+          </span>
+          <input type="checkbox" className="switch" checked={showSubtasks} onChange={(e) => setShowSubtasks(e.target.checked)} />
+        </label>
+        <label className="switch-row">
+          <span>
+            Nummern auf Karten zeigen
+            <span className="muted small"> · für „warte auf 4“</span>
+          </span>
+          <input type="checkbox" className="switch" checked={showNums} onChange={(e) => setShowNums(e.target.checked)} />
+        </label>
+        <div>
+          <button className={`done-toggle ${help ? 'open' : ''}`} onClick={() => setHelp((h) => !h)} style={{ paddingLeft: 0 }}>
+            <ChevronRight /> Was die Eingabe versteht
+          </button>
+          {help && <LangHelp />}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span>
+            {n === 0 ? 'Noch keine Vorlagen' : `${n} ${n === 1 ? 'Vorlage' : 'Vorlagen'}`}
+            <span className="muted small"> · speichern über „Als Vorlage“ in einer Aufgabe</span>
+          </span>
+          <span style={{ flex: 1 }} />
+          {n > 0 && (
+            <button
+              className="btn sm ghost"
+              onClick={() => {
+                setSettings(false)
+                openTemplatePicker({})
+              }}
+            >
+              Verwalten
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}
+
 function AppSection() {
   const signOut = useStore((s) => s.signOut)
   const [canInstall, setCanInstall] = useState(!!installEvent)
@@ -202,7 +378,11 @@ function AppSection() {
           <p className="muted small">Auf dem Handy: im Browser-Menü „Zum Startbildschirm hinzufügen“ bzw. „App installieren“.</p>
         )}
         <p className="muted small">
-          Tastatur: <kbd>N</kbd> neue Aufgabe · <kbd>/</kbd> suchen · <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> Ansicht wechseln · <kbd>Esc</kbd> schließen
+          Tastatur: <kbd>Strg</kbd>+<kbd>K</kbd> Befehle · <kbd>N</kbd> neue Aufgabe · <kbd>/</kbd> suchen · <kbd>F</kbd> Filter · <kbd>U</kbd> Unteraufgaben · <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> Ansicht wechseln · <kbd>Esc</kbd> schließen
+        </p>
+        <p className="muted small">
+          <a href="/datenschutz" target="_blank" rel="noreferrer" style={{ color: 'inherit' }}>Datenschutz</a> ·{' '}
+          <a href="/nutzungsbedingungen" target="_blank" rel="noreferrer" style={{ color: 'inherit' }}>Nutzungsbedingungen</a>
         </p>
         <div>
           <button className="btn sm ghost" onClick={() => void signOut()}>

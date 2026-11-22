@@ -107,4 +107,56 @@ export const MIGRATIONS: Migration[] = [
       )`,
     ],
   },
+  {
+    id: 3,
+    name: 'deadlines_blocking_templates_push',
+    statements: [
+      // Frist (getrennt vom Tag, an dem man die Aufgabe erledigen will)
+      `ALTER TABLE tasks ADD COLUMN deadline TEXT`,
+      // Aufgabe wartet auf andere Aufgaben (JSON-Liste von ids)
+      `ALTER TABLE tasks ADD COLUMN blocked_by TEXT NOT NULL DEFAULT '[]'`,
+
+      `CREATE TABLE templates (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 100),
+        payload     TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        deleted_at  TEXT,
+        seq         INTEGER NOT NULL DEFAULT 0
+      )`,
+      `CREATE INDEX templates_seq_idx ON templates (seq)`,
+
+      // Einstellungen, die zwischen Geräten synchronisiert werden (Ansichten, Benachrichtigungen …)
+      `CREATE TABLE prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0)`,
+      // Interne Werte (z. B. Schlüssel für Push)
+      `CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+
+      `CREATE TABLE push_subscriptions (
+        endpoint    TEXT PRIMARY KEY,
+        timezone    TEXT NOT NULL,
+        user_agent  TEXT,
+        created_at  TEXT NOT NULL,
+        last_ok     TEXT
+      )`,
+      `CREATE TABLE notifications (id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, url TEXT, tag TEXT, created_at INTEGER NOT NULL)`,
+      `CREATE TABLE reminders_sent (key TEXT PRIMARY KEY, sent_at INTEGER NOT NULL)`,
+      `CREATE TABLE op_log (op_id TEXT PRIMARY KEY, status INTEGER NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL)`,
+    ],
+  },
+  {
+    id: 4,
+    name: 'task_numbers_estimate',
+    statements: [
+      // kurze Nummer pro Aufgabe („warte auf 4“) und geschätzte Dauer in Minuten
+      `ALTER TABLE tasks ADD COLUMN num INTEGER`,
+      `ALTER TABLE tasks ADD COLUMN estimate INTEGER`,
+      `UPDATE tasks SET num = (SELECT COUNT(*) FROM tasks t2 WHERE t2.created_at < tasks.created_at OR (t2.created_at = tasks.created_at AND t2.id <= tasks.id))`,
+      `CREATE UNIQUE INDEX tasks_num_idx ON tasks (num)`,
+      `INSERT OR REPLACE INTO meta (key, value) SELECT 'next_num', COALESCE(MAX(num), 0) + 1 FROM tasks`,
+      // damit alle Geräte die Nummern auch beim kleinen Abgleich bekommen
+      `UPDATE meta SET value = value + 1 WHERE key = 'seq'`,
+      `UPDATE tasks SET seq = (SELECT value FROM meta WHERE key = 'seq') WHERE deleted_at IS NULL`,
+    ],
+  },
 ]

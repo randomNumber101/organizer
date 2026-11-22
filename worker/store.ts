@@ -22,7 +22,8 @@ import {
   type GoogleEnv,
 } from './google'
 import { daysBetween, nextOccurrence } from '../shared/recurrence'
-import { moveBlockToDate } from '../shared/tz'
+import { moveBlockToDate, utcToZoned, zonedToUtc } from '../shared/tz'
+import { generateVapidKeys, sendTickle, validEndpoint, type VapidKeys } from './push'
 
 export interface Env extends GoogleEnv {
   STORE: DurableObjectNamespace<OrganizerStore>
@@ -43,6 +44,9 @@ interface GoogleAccountRow extends Record<string, SqlStorageValue> {
   connected_at: string
 }
 
+/** Erinnerung vor einer Frist mit Uhrzeit */
+const DEADLINE_LEAD = 60 * 60_000
+
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } })
 
@@ -56,6 +60,8 @@ const PULL_EVERY = 10 * MIN
 
 const TASK_PATH = /^\/api\/tasks\/([0-9a-f-]{36})$/i
 const LIST_PATH = /^\/api\/lists\/([0-9a-f-]{36})$/i
+const TEMPLATE_PATH = /^\/api\/templates\/([0-9a-f-]{36})$/i
+const PREF_PATH = /^\/api\/prefs\/(views|push|ritual|board)$/
 
 /** Nach jeder Änderung: muss der Google-Termin der Aufgabe angepasst werden? */
 const MARK_DIRTY = `gcal_dirty = CASE WHEN start_at IS NOT NULL OR gcal_event_id IS NOT NULL THEN 1 ELSE gcal_dirty END`
@@ -145,6 +151,11 @@ export class OrganizerStore extends DurableObject<Env> {
   }
 
   /** Fortlaufende Änderungsnummer für die Synchronisation */
+  /** Laufende Nummer für neue Aufgaben (wird nie wiederverwendet) */
+  private nextNum(): number {
+    return this.sql.exec<{ n: number }>(`UPDATE meta SET value = value + 1 WHERE key = 'next_num' RETURNING value - 1 AS n`).one().n
+  }
+
   private nextSeq(): number {
     return this.sql.exec<{ value: number }>(`UPDATE meta SET value = value + 1 WHERE key = 'seq' RETURNING value`).one().value
   }
@@ -162,7 +173,7 @@ export class OrganizerStore extends DurableObject<Env> {
   // Alarm: Aufräumen, Google abgleichen, fehlgeschlagene Übertragungen wiederholen
   // -------------------------------------------------------------------------
   private async scheduleAlarm() {
-    const times = ['cleanup_at', 'gpull_at', 'gpush_at'].map((k) => this.metaGet(k)).filter((v): v is number => v !== null)
+    const times = ['cleanup_at', 'gpull_at', 'gpush_at', 'push_at'].map((k) => this.metaGet(k)).filter((v): v is number => v !== null)
     if (!times.length) return
     const next = Math.max(Date.now() + 1000, Math.min(...times))
     const cur = await this.ctx.storage.getAlarm()
@@ -178,6 +189,10 @@ export class OrganizerStore extends DurableObject<Env> {
     if ((this.metaGet('gpush_at') ?? Infinity) <= now) {
       this.metaSet('gpush_at', null)
       await this.pushGoogle()
+    }
+    if ((this.metaGet('push_at') ?? Infinity) <= now + 30_000) {
+      await this.sendDueReminders().catch((e) => console.warn('reminders', e))
+      this.planReminders()
     }
     if ((this.metaGet('gpull_at') ?? Infinity) <= now) {
       this.metaSet('gpull_at', this.account() ? now + PULL_EVERY : null)
@@ -197,6 +212,7 @@ export class OrganizerStore extends DurableObject<Env> {
       this.sql.exec(`DELETE FROM sessions WHERE expires_at < ?`, new Date(now).toISOString())
       this.sql.exec(`DELETE FROM login_attempts WHERE ts < ?`, now - DAY)
       this.sql.exec(`DELETE FROM oauth_states WHERE created_at < ?`, now - DAY)
+      this.sql.exec(`DELETE FROM op_log WHERE created_at < ?`, now - 7 * DAY)
       this.sql.exec(`UPDATE tasks SET parent_id = NULL WHERE (deleted_at IS NULL OR deleted_at >= ?1) AND parent_id IN (SELECT id FROM tasks WHERE deleted_at < ?1)`, cutoff)
       this.sql.exec(`UPDATE tasks SET list_id = NULL WHERE list_id IN (SELECT id FROM lists WHERE deleted_at < ?)`, cutoff)
       this.sql.exec(`DELETE FROM tasks WHERE deleted_at < ? AND gcal_dirty = 0`, cutoff)
@@ -252,6 +268,13 @@ export class OrganizerStore extends DurableObject<Env> {
       return json(out)
     }
 
+    // Push
+    if (pathname === '/api/push/key' && method === 'GET') return json({ publicKey: (await this.vapid()).publicKey })
+    if (pathname === '/api/push/subscribe' && method === 'POST') return json(await this.pushSubscribe(req, await readJson(req)))
+    if (pathname === '/api/push/unsubscribe' && method === 'POST') return json(this.pushUnsubscribe(await readJson(req)))
+    if (pathname === '/api/push/pending' && method === 'GET') return json(this.pushPending())
+    if (pathname === '/api/push/test' && method === 'POST') return json(await this.pushTest())
+
     // Google
     if (pathname === '/api/google/status' && method === 'GET') return json(await this.googleStatus())
     if (pathname === '/api/google/connect' && method === 'GET') return this.googleConnect(url)
@@ -269,21 +292,40 @@ export class OrganizerStore extends DurableObject<Env> {
     // ab hier nur Änderungen an Aufgaben/Listen
     const tm = pathname.match(TASK_PATH)
     const lm = pathname.match(LIST_PATH)
-    let res: Response | null = null
+    const tplm = pathname.match(TEMPLATE_PATH)
+    const prefm = pathname.match(PREF_PATH)
+    // Offline-Warteschlange: jede Änderung hat eine eigene id. Kommt dieselbe nochmal
+    // (Antwort ging unterwegs verloren), liefern wir die alte Antwort statt sie doppelt auszuführen.
+    const opId = req.headers.get('X-Op-Id')
+    if (opId && isUuid(opId)) {
+      const seen = this.sql.exec<{ status: number; body: string }>(`SELECT status, body FROM op_log WHERE op_id = ?`, opId).toArray()[0]
+      if (seen) return new Response(seen.body, { status: seen.status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' } })
+    }
 
-    if (pathname === '/api/rollover' && method === 'POST') res = json(this.rollover(await readJson(req)))
-    else if (pathname === '/api/tasks' && method === 'POST') res = json(this.createTask(await readJson(req)), 201)
-    else if (pathname === '/api/tasks/bulk' && method === 'POST') res = json(this.bulkStatus(await readJson(req)))
-    else if (pathname === '/api/tasks/restore' && method === 'POST') res = json(this.restoreTasks(await readJson(req)))
-    else if (tm && method === 'PATCH') res = json(this.updateTask(tm[1], await readJson(req)))
-    else if (tm && method === 'DELETE') res = json(this.deleteTask(tm[1]))
-    else if (pathname === '/api/lists' && method === 'POST') res = json(this.createList(await readJson(req)), 201)
-    else if (lm && method === 'PATCH') res = json(this.updateList(lm[1], await readJson(req)))
-    else if (lm && method === 'DELETE') res = json(this.deleteList(lm[1]))
+    let out: [unknown, number] | null = null
+    if (pathname === '/api/rollover' && method === 'POST') out = [this.rollover(await readJson(req)), 200]
+    else if (pathname === '/api/tasks' && method === 'POST') out = [this.createTask(await readJson(req)), 201]
+    else if (pathname === '/api/tasks/bulk' && method === 'POST') out = [this.bulkStatus(await readJson(req)), 200]
+    else if (pathname === '/api/tasks/restore' && method === 'POST') out = [this.restoreTasks(await readJson(req)), 200]
+    else if (tm && method === 'PATCH') out = [this.updateTask(tm[1], await readJson(req)), 200]
+    else if (tm && method === 'DELETE') out = [this.deleteTask(tm[1]), 200]
+    else if (pathname === '/api/lists' && method === 'POST') out = [this.createList(await readJson(req)), 201]
+    else if (lm && method === 'PATCH') out = [this.updateList(lm[1], await readJson(req)), 200]
+    else if (lm && method === 'DELETE') out = [this.deleteList(lm[1]), 200]
+    else if (pathname === '/api/templates' && method === 'POST') out = [this.saveTemplate(null, await readJson(req)), 201]
+    else if (tplm && method === 'PATCH') out = [this.saveTemplate(tplm[1], await readJson(req)), 200]
+    else if (tplm && method === 'DELETE') out = [this.deleteTemplate(tplm[1]), 200]
+    else if (prefm && method === 'PUT') out = [this.setPref(prefm[1], await readJson(req)), 200]
 
-    if (!res) throw new HttpError(404, 'Unbekannte Adresse')
+    if (!out) throw new HttpError(404, 'Unbekannte Adresse')
+    const res = json(out[0], out[1])
+    if (opId && isUuid(opId)) {
+      this.sql.exec(`INSERT OR REPLACE INTO op_log (op_id, status, body, created_at) VALUES (?, ?, ?, ?)`, opId, out[1], JSON.stringify(out[0]), Date.now())
+    }
     this.broadcast()
     this.queuePush()
+    this.planReminders()
+    await this.scheduleAlarm()
     return res
   }
 
@@ -345,6 +387,17 @@ export class OrganizerStore extends DurableObject<Env> {
       tasks: tasks.filter((t) => !t.deleted_at).map(taskOut),
       deletedListIds: lists.filter((l) => l.deleted_at).map((l) => l.id),
       deletedTaskIds: tasks.filter((t) => t.deleted_at).map((t) => t.id),
+      ...this.syncExtras(since),
+    }
+  }
+
+  private syncExtras(since: number) {
+    const tpl = this.sql.exec<TemplateRow>(since ? `SELECT * FROM templates WHERE seq > ?` : `SELECT * FROM templates WHERE deleted_at IS NULL`, ...(since ? [since] : [])).toArray()
+    const prefs = this.sql.exec<{ key: string; value: string }>(since ? `SELECT key, value FROM prefs WHERE seq > ?` : `SELECT key, value FROM prefs`, ...(since ? [since] : [])).toArray()
+    return {
+      templates: tpl.filter((t) => !t.deleted_at).map(templateOut),
+      deletedTemplateIds: tpl.filter((t) => t.deleted_at).map((t) => t.id),
+      prefs: Object.fromEntries(prefs.map((p) => [p.key, safeJson(p.value)])),
     }
   }
 
@@ -390,14 +443,18 @@ export class OrganizerStore extends DurableObject<Env> {
       t.completed_at,
       t.sort,
       t.origin_event_id,
+      t.deadline,
+      JSON.stringify(t.blocked_by ?? []),
+      t.estimate ?? null,
     ]
     if (insert) {
       return this.sql
         .exec<TaskRow>(
           `INSERT INTO tasks (list_id, parent_id, title, notes, status, priority, horizon, tags, due_date, start_at, end_at,
-             timezone, rrule, completed_at, sort, origin_event_id, id, created_at, updated_at, seq, gcal_event_id, gcal_etag, gcal_dirty)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+             timezone, rrule, completed_at, sort, origin_event_id, deadline, blocked_by, estimate, num, id, created_at, updated_at, seq, gcal_event_id, gcal_etag, gcal_dirty)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
           ...values,
+          this.nextNum(),
           id,
           now,
           now,
@@ -412,6 +469,7 @@ export class OrganizerStore extends DurableObject<Env> {
       .exec<TaskRow>(
         `UPDATE tasks SET list_id = ?, parent_id = ?, title = ?, notes = ?, status = ?, priority = ?, horizon = ?, tags = ?,
            due_date = ?, start_at = ?, end_at = ?, timezone = ?, rrule = ?, completed_at = ?, sort = ?, origin_event_id = ?,
+           deadline = ?, blocked_by = ?, estimate = ?,
            updated_at = ?, seq = ?, ${extra.dirty === false ? 'gcal_dirty = gcal_dirty' : MARK_DIRTY}
          WHERE id = ? RETURNING *`,
         ...values,
@@ -422,6 +480,30 @@ export class OrganizerStore extends DurableObject<Env> {
       .one()
   }
 
+  /** „Wartet auf“: keine Selbstblockade, keine Kreise (A wartet auf B wartet auf A) */
+  private checkBlockers(id: string, blockers: string[]) {
+    if (!blockers.length) return
+    if (blockers.includes(id)) throw new HttpError(400, 'Eine Aufgabe kann nicht auf sich selbst warten')
+    const graph = new Map<string, string[]>()
+    for (const r of this.sql.exec<{ id: string; blocked_by: string }>(`SELECT id, blocked_by FROM tasks WHERE deleted_at IS NULL AND blocked_by != '[]'`).toArray()) {
+      try {
+        graph.set(r.id, JSON.parse(r.blocked_by))
+      } catch {
+        /* egal */
+      }
+    }
+    graph.set(id, blockers)
+    const seen = new Set<string>()
+    const stack = [...blockers]
+    while (stack.length) {
+      const cur = stack.pop()!
+      if (cur === id) throw new HttpError(400, 'Das würde eine Kreis-Abhängigkeit erzeugen')
+      if (seen.has(cur)) continue
+      seen.add(cur)
+      stack.push(...(graph.get(cur) ?? []))
+    }
+  }
+
   private createTask(body: unknown) {
     const input = cleanTaskInput(body)
     if (!input.title) throw new HttpError(400, 'Titel fehlt')
@@ -430,6 +512,7 @@ export class OrganizerStore extends DurableObject<Env> {
     const t = normalizeTask({ ...DEFAULT_TASK(), sort: Date.now(), ...input, title: input.title }, now)
     return this.tx(() => {
       this.checkRefs(id, t.list_id, t.parent_id)
+      this.checkBlockers(id, t.blocked_by)
       return taskOut(this.writeTask(id, t, now, true))
     })
   }
@@ -441,6 +524,7 @@ export class OrganizerStore extends DurableObject<Env> {
       const cur = this.sql.exec<TaskRow>(`SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL`, id).toArray()[0]
       if (!cur) throw new HttpError(404, 'Aufgabe nicht gefunden')
       if ('list_id' in patch || 'parent_id' in patch) this.checkRefs(id, patch.list_id, patch.parent_id)
+      if (patch.blocked_by) this.checkBlockers(id, patch.blocked_by)
       const now = nowIso()
       const t = normalizeTask({ ...taskOut(cur), ...patch }, now)
       return taskOut(this.writeTask(id, t, now, false))
@@ -663,6 +747,340 @@ export class OrganizerStore extends DurableObject<Env> {
   }
 
   // -------------------------------------------------------------------------
+  // Vorlagen
+  // -------------------------------------------------------------------------
+  private saveTemplate(id: string | null, body: unknown) {
+    const b = (body ?? {}) as { id?: unknown; name?: unknown; payload?: unknown }
+    const name = typeof b.name === 'string' ? b.name.trim() : undefined
+    if (id === null && (!name || name.length > 100)) throw new HttpError(400, 'Name fehlt oder ist zu lang')
+    if (name !== undefined && (name.length < 1 || name.length > 100)) throw new HttpError(400, 'Ungültiger Name')
+    const payload = b.payload !== undefined ? cleanTemplatePayload(b.payload) : undefined
+    if (id === null && !payload) throw new HttpError(400, 'Inhalt fehlt')
+    return this.tx(() => {
+      const now = nowIso()
+      const seq = this.nextSeq()
+      if (id === null) {
+        const newId = isUuid(b.id) ? b.id : crypto.randomUUID()
+        return templateOut(
+          this.sql
+            .exec<TemplateRow>(`INSERT INTO templates (id, name, payload, created_at, updated_at, seq) VALUES (?, ?, ?, ?, ?, ?) RETURNING *`, newId, name!, JSON.stringify(payload), now, now, seq)
+            .one(),
+        )
+      }
+      const cur = this.sql.exec<TemplateRow>(`SELECT * FROM templates WHERE id = ? AND deleted_at IS NULL`, id).toArray()[0]
+      if (!cur) throw new HttpError(404, 'Vorlage nicht gefunden')
+      return templateOut(
+        this.sql
+          .exec<TemplateRow>(
+            `UPDATE templates SET name = ?, payload = ?, updated_at = ?, seq = ? WHERE id = ? RETURNING *`,
+            name ?? cur.name,
+            payload ? JSON.stringify(payload) : cur.payload,
+            now,
+            seq,
+            id,
+          )
+          .one(),
+      )
+    })
+  }
+
+  private deleteTemplate(id: string) {
+    return this.tx(() => {
+      const hit = this.sql.exec(`UPDATE templates SET deleted_at = ?1, updated_at = ?1, seq = ?2 WHERE id = ?3 AND deleted_at IS NULL RETURNING id`, nowIso(), this.nextSeq(), id).toArray()
+      if (!hit.length) throw new HttpError(404, 'Vorlage nicht gefunden')
+      return { ok: true }
+    })
+  }
+
+  // -------------------------------------------------------------------------
+  // Einstellungen (zwischen Geräten synchronisiert)
+  // -------------------------------------------------------------------------
+  private setPref(key: string, body: unknown) {
+    const value = (body as { value?: unknown } | null)?.value
+    const raw = JSON.stringify(value ?? null)
+    if (raw.length > 50_000) throw new HttpError(400, 'Zu groß')
+    if (key === 'push') {
+      const v = value as { morning?: unknown; evening?: unknown; lead?: unknown }
+      const time = (t: unknown) => t === null || (typeof t === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(t))
+      if (!v || typeof v !== 'object' || !time(v.morning ?? null) || !time(v.evening ?? null) || ![0, 5, 10, 15, 30, 60].includes(Number(v.lead ?? 10))) {
+        throw new HttpError(400, 'Ungültige Benachrichtigungs-Einstellungen')
+      }
+    }
+    return this.tx(() => {
+      this.sql.exec(
+        `INSERT INTO prefs (key, value, updated_at, seq) VALUES (?, ?, ?, ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, seq = excluded.seq`,
+        key,
+        raw,
+        nowIso(),
+        this.nextSeq(),
+      )
+      return { ok: true }
+    })
+  }
+
+  private pref<T>(key: string, fallback: T): T {
+    const r = this.sql.exec<{ value: string }>(`SELECT value FROM prefs WHERE key = ?`, key).toArray()[0]
+    if (!r) return fallback
+    const v = safeJson(r.value)
+    return (v ?? fallback) as T
+  }
+
+  // -------------------------------------------------------------------------
+  // Push-Benachrichtigungen
+  // -------------------------------------------------------------------------
+  private kvGet(key: string): string | null {
+    return this.sql.exec<{ value: string }>(`SELECT value FROM kv WHERE key = ?`, key).toArray()[0]?.value ?? null
+  }
+
+  private kvSet(key: string, value: string) {
+    this.sql.exec(`INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
+  }
+
+  private async vapid(): Promise<VapidKeys> {
+    const cur = this.kvGet('vapid')
+    if (cur) return JSON.parse(cur) as VapidKeys
+    const keys = await generateVapidKeys()
+    this.kvSet('vapid', JSON.stringify(keys))
+    return keys
+  }
+
+  private hasPush(): boolean {
+    return this.sql.exec(`SELECT 1 FROM push_subscriptions LIMIT 1`).toArray().length > 0
+  }
+
+  private pushSettings(): { morning: string | null; evening: string | null; lead: number } {
+    const p = this.pref<{ morning?: string | null; evening?: string | null; lead?: number }>('push', {})
+    return { morning: p.morning === undefined ? '08:00' : p.morning, evening: p.evening ?? null, lead: p.lead ?? 10 }
+  }
+
+  private async pushSubscribe(req: Request, body: unknown) {
+    const b = (body ?? {}) as { endpoint?: unknown; timezone?: unknown }
+    if (!validEndpoint(b.endpoint)) throw new HttpError(400, 'Ungültiges Abo')
+    let tz = typeof b.timezone === 'string' ? b.timezone : 'Europe/Berlin'
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: tz })
+    } catch {
+      tz = 'Europe/Berlin'
+    }
+    this.kvSet('vapid_sub', new URL(req.url).origin)
+    const had = this.hasPush()
+    this.sql.exec(
+      `INSERT INTO push_subscriptions (endpoint, timezone, user_agent, created_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT (endpoint) DO UPDATE SET timezone = excluded.timezone, created_at = excluded.created_at`,
+      b.endpoint,
+      tz,
+      (req.headers.get('User-Agent') ?? '').slice(0, 200),
+      nowIso(),
+    )
+    // ab jetzt erinnert die App – Google-Termine ohne eigene Erinnerung neu schreiben
+    if (!had) {
+      this.sql.exec(`UPDATE tasks SET gcal_dirty = 1 WHERE gcal_event_id IS NOT NULL AND deleted_at IS NULL AND status = 'open'`)
+      this.queuePush()
+    }
+    this.planReminders()
+    await this.scheduleAlarm()
+    return { ok: true }
+  }
+
+  private pushUnsubscribe(body: unknown) {
+    const endpoint = (body as { endpoint?: unknown } | null)?.endpoint
+    const had = this.hasPush()
+    if (typeof endpoint === 'string') this.sql.exec(`DELETE FROM push_subscriptions WHERE endpoint = ?`, endpoint)
+    if (had && !this.hasPush()) {
+      this.sql.exec(`UPDATE tasks SET gcal_dirty = 1 WHERE gcal_event_id IS NOT NULL AND deleted_at IS NULL AND status = 'open'`)
+      this.queuePush()
+    }
+    this.planReminders()
+    return { ok: true }
+  }
+
+  /** Vom Service Worker nach einem Push abgefragt: was soll angezeigt werden? */
+  private pushPending() {
+    const rows = this.sql
+      .exec<{ id: string; title: string; body: string; url: string | null; tag: string | null }>(
+        `SELECT id, title, body, url, tag FROM notifications WHERE created_at > ? ORDER BY created_at`,
+        Date.now() - 3 * MIN,
+      )
+      .toArray()
+    return { notifications: rows }
+  }
+
+  private async pushTest() {
+    const n = await this.notify([{ title: 'Organizer', body: 'So sehen Erinnerungen aus. 👋', url: '/', tag: 'test' }])
+    return { sent: n }
+  }
+
+  private async notify(items: { title: string; body: string; url: string; tag: string }[]): Promise<number> {
+    if (!items.length) return 0
+    const now = Date.now()
+    for (const it of items) this.sql.exec(`INSERT INTO notifications (id, title, body, url, tag, created_at) VALUES (?, ?, ?, ?, ?, ?)`, crypto.randomUUID(), it.title, it.body, it.url, it.tag, now)
+    this.sql.exec(`DELETE FROM notifications WHERE created_at < ?`, now - DAY)
+    const subs = this.sql.exec<{ endpoint: string }>(`SELECT endpoint FROM push_subscriptions`).toArray()
+    const keys = await this.vapid()
+    const subject = this.kvGet('vapid_sub') ?? 'mailto:organizer@example.invalid'
+    let ok = 0
+    for (const s of subs) {
+      const r = await sendTickle(s.endpoint, keys, subject)
+      if (r === 'gone') this.sql.exec(`DELETE FROM push_subscriptions WHERE endpoint = ?`, s.endpoint)
+      if (r === 'ok') {
+        ok++
+        this.sql.exec(`UPDATE push_subscriptions SET last_ok = ? WHERE endpoint = ?`, nowIso(), s.endpoint)
+      }
+    }
+    return ok
+  }
+
+  private pushTz(): string | null {
+    return this.sql.exec<{ timezone: string }>(`SELECT timezone FROM push_subscriptions ORDER BY created_at DESC LIMIT 1`).toArray()[0]?.timezone ?? null
+  }
+
+  private wasSent(key: string) {
+    return this.sql.exec(`SELECT 1 FROM reminders_sent WHERE key = ?`, key).toArray().length > 0
+  }
+
+  /** Nächsten Erinnerungszeitpunkt berechnen (Aufgaben mit Uhrzeit, Morgenübersicht, Abendrückblick) */
+  private planReminders() {
+    const tz = this.pushTz()
+    if (!tz) {
+      this.metaSet('push_at', null)
+      return
+    }
+    const now = Date.now()
+    const p = this.pushSettings()
+    const due: number[] = []
+    const rows = this.sql
+      .exec<{ id: string; start_at: string }>(
+        `SELECT id, start_at FROM tasks WHERE deleted_at IS NULL AND status = 'open' AND start_at > ? AND start_at < ?`,
+        new Date(now - 5 * MIN).toISOString(),
+        new Date(now + 3 * DAY).toISOString(),
+      )
+      .toArray()
+    for (const r of rows) {
+      const at = Date.parse(r.start_at) - p.lead * MIN
+      if (at > now - 5 * MIN && !this.wasSent(`t:${r.id}:${r.start_at}`)) due.push(Math.max(at, now))
+    }
+    // Fristen mit Uhrzeit: eine Stunde vorher
+    for (const r of this.timedDeadlines()) {
+      const at = zonedToUtc(r.deadline.slice(0, 10), r.deadline.slice(11), tz) - DEADLINE_LEAD
+      if (at > now - 5 * MIN && at < now + 3 * DAY && !this.wasSent(`d:${r.id}:${r.deadline}`)) due.push(Math.max(at, now))
+    }
+    const today = utcToZoned(now, tz).date
+    const tomorrow = utcToZoned(now + DAY, tz).date
+    for (const [kind, time] of [
+      ['m', p.morning],
+      ['e', p.evening],
+    ] as const) {
+      if (!time) continue
+      for (const d of [today, tomorrow]) {
+        const at = zonedToUtc(d, time, tz)
+        if (at > now - 30 * MIN && !this.wasSent(`${kind}:${d}`)) {
+          due.push(Math.max(at, now))
+          break
+        }
+      }
+    }
+    this.metaSet('push_at', due.length ? Math.min(...due) : null)
+  }
+
+  private timedDeadlines() {
+    return this.sql
+      .exec<{ id: string; title: string; deadline: string }>(`SELECT id, title, deadline FROM tasks WHERE deleted_at IS NULL AND status = 'open' AND length(deadline) = 16`)
+      .toArray()
+  }
+
+  private async sendDueReminders() {
+    const tz = this.pushTz()
+    if (!tz) return
+    const now = Date.now()
+    const p = this.pushSettings()
+    const items: { title: string; body: string; url: string; tag: string }[] = []
+    const mark: string[] = []
+
+    const rows = this.sql
+      .exec<TaskRow>(
+        `SELECT * FROM tasks WHERE deleted_at IS NULL AND status = 'open' AND start_at > ? AND start_at <= ?`,
+        new Date(now - 5 * MIN).toISOString(),
+        new Date(now + p.lead * MIN + 30_000).toISOString(),
+      )
+      .toArray()
+    for (const t of rows) {
+      const key = `t:${t.id}:${t.start_at}`
+      if (this.wasSent(key)) continue
+      const { time } = utcToZoned(Date.parse(t.start_at!), tz)
+      const end = t.end_at ? utcToZoned(Date.parse(t.end_at), tz).time : null
+      const list = t.list_id ? this.sql.exec<{ name: string }>(`SELECT name FROM lists WHERE id = ?`, t.list_id).toArray()[0]?.name : null
+      const mins = Math.round((Date.parse(t.start_at!) - now) / MIN)
+      items.push({
+        title: t.title,
+        body: [mins > 1 ? `in ${mins} Min.` : 'jetzt', `${time}${end ? `–${end}` : ''}`, list].filter(Boolean).join(' · '),
+        url: `/?task=${t.id}`,
+        tag: `task-${t.id}`,
+      })
+      mark.push(key)
+    }
+    for (const r of this.timedDeadlines()) {
+      const key = `d:${r.id}:${r.deadline}`
+      const due = zonedToUtc(r.deadline.slice(0, 10), r.deadline.slice(11), tz)
+      const at = due - DEADLINE_LEAD
+      if (this.wasSent(key) || !(at <= now + 30_000 && at > now - 30 * MIN)) continue
+      const mins = Math.max(0, Math.round((due - now) / MIN))
+      items.push({
+        title: `Frist: ${r.title}`,
+        body: mins > 1 ? `noch ${mins} Min. – bis ${r.deadline.slice(11)} Uhr` : `jetzt fällig (${r.deadline.slice(11)} Uhr)`,
+        url: `/?task=${r.id}`,
+        tag: `deadline-${r.id}`,
+      })
+      mark.push(key)
+    }
+
+    const today = utcToZoned(now, tz).date
+    const tomorrow = utcToZoned(now + DAY, tz).date
+    const inWindow = (at: number) => at <= now + 30_000 && at > now - 30 * MIN
+    if (p.morning && !this.wasSent(`m:${today}`) && inWindow(zonedToUtc(today, p.morning, tz))) {
+      const open = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM tasks WHERE deleted_at IS NULL AND status = 'open' AND due_date <= ?`, today).one().n
+      const deadlines = this.sql
+        .exec<{ title: string; deadline: string }>(`SELECT title, deadline FROM tasks WHERE deleted_at IS NULL AND status = 'open' AND substr(deadline, 1, 10) <= ? ORDER BY deadline LIMIT 2`, tomorrow)
+        .toArray()
+      let events = 0
+      try {
+        events = (await this.fetchEvents(today, today)).filter((e) => !e.allDay && utcToZoned(Date.parse(e.start), tz).date === today).length
+      } catch {
+        /* Google gerade nicht erreichbar */
+      }
+      const ritual = this.pref<{ planned?: string }>('ritual', {})
+      const parts = [open === 1 ? '1 Aufgabe' : `${open} Aufgaben`, events ? `${events} ${events === 1 ? 'Termin' : 'Termine'}` : null]
+      const dl = deadlines.map((d) => {
+        const day = d.deadline.slice(0, 10)
+        const when = day < today ? 'überfällig' : day === today ? 'heute fällig' : 'morgen fällig'
+        return `${when}${d.deadline.length > 10 ? ` (${d.deadline.slice(11)})` : ''}: ${d.title}`
+      })
+      items.push({
+        title: 'Guten Morgen – dein Tag',
+        body: [parts.filter(Boolean).join(' · '), ...dl].join('\n') + (ritual.planned === today ? '' : '\nTippen, um den Tag zu planen'),
+        url: ritual.planned === today ? '/?view=today' : '/?action=plan',
+        tag: 'morning',
+      })
+      mark.push(`m:${today}`)
+    }
+    if (p.evening && !this.wasSent(`e:${today}`) && inWindow(zonedToUtc(today, p.evening, tz))) {
+      const open = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM tasks WHERE deleted_at IS NULL AND status = 'open' AND due_date <= ?`, today).one().n
+      const done = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM tasks WHERE deleted_at IS NULL AND status = 'done' AND completed_at >= ?`, new Date(zonedToUtc(today, '00:00', tz)).toISOString()).one().n
+      items.push({
+        title: 'Tag abschließen?',
+        body: `${done} erledigt${open ? ` · ${open} noch offen` : ' – alles geschafft'}`,
+        url: '/?action=review',
+        tag: 'evening',
+      })
+      mark.push(`e:${today}`)
+    }
+
+    for (const k of mark) this.sql.exec(`INSERT OR REPLACE INTO reminders_sent (key, sent_at) VALUES (?, ?)`, k, now)
+    this.sql.exec(`DELETE FROM reminders_sent WHERE sent_at < ?`, now - 7 * DAY)
+    await this.notify(items)
+  }
+
+  // -------------------------------------------------------------------------
   // Google Kalender – Verbindung
   // -------------------------------------------------------------------------
   private cfg(): GoogleConfig | null {
@@ -725,6 +1143,10 @@ export class OrganizerStore extends DurableObject<Env> {
     if (acc.status !== 'ok') return base
     try {
       const selected: string[] | null = acc.selected_calendars ? JSON.parse(acc.selected_calendars) : null
+      if (!acc.organizer_calendar_id) {
+        await this.ensureOrganizerCalendar(await this.calendars(true))
+        acc.organizer_calendar_id = this.account()?.organizer_calendar_id ?? null
+      }
       const cals = (await this.calendars())
         .filter((c) => c.id !== acc.organizer_calendar_id)
         .map((c) => ({
@@ -738,6 +1160,10 @@ export class OrganizerStore extends DurableObject<Env> {
       return { ...base, calendars: cals }
     } catch (e) {
       if (e instanceof HttpError && e.status === 409) return { ...base, status: 'reauth' }
+      if (e instanceof GoogleApiError) {
+        console.warn('google status', e.status, e.reason, e.message)
+        return { ...base, status: 'reauth', problem: e.reason ?? e.message }
+      }
       throw e
     }
   }
@@ -748,7 +1174,7 @@ export class OrganizerStore extends DurableObject<Env> {
     const { verifier, challenge } = await pkcePair()
     const state = randomState()
     const redirectUri = `${url.origin}/api/google/callback`
-    this.sql.exec(`DELETE FROM oauth_states WHERE created_at < ?`, Date.now() - 15 * MIN)
+    this.sql.exec(`DELETE FROM oauth_states WHERE created_at < ?`, Date.now() - 60 * MIN)
     this.sql.exec(`INSERT INTO oauth_states (state, verifier, redirect_uri, created_at) VALUES (?, ?, ?, ?)`, state, verifier, redirectUri, Date.now())
     return redirect(buildAuthUrl(cfg, { state, challenge, redirectUri }))
   }
@@ -762,7 +1188,12 @@ export class OrganizerStore extends DurableObject<Env> {
     const code = url.searchParams.get('code') ?? ''
     const row = this.sql.exec<{ verifier: string; redirect_uri: string; created_at: number }>(`SELECT * FROM oauth_states WHERE state = ?`, state).toArray()[0]
     this.sql.exec(`DELETE FROM oauth_states WHERE state = ?`, state)
-    if (!row || Date.now() - row.created_at > 15 * MIN || !code) return redirect('/?google=error&reason=state')
+    if (!row || !code) {
+      // Rückruf kam doppelt an (z. B. Browser-Tab und installierte App): war die Verbindung eben erfolgreich, ist alles gut
+      if (this.account()?.status === 'ok' && Date.now() - (this.metaGet('gconnected_at') ?? 0) < 10 * MIN) return redirect('/?google=connected')
+      return redirect('/?google=error&reason=state')
+    }
+    if (Date.now() - row.created_at > 60 * MIN) return redirect('/?google=error&reason=expired')
 
     try {
       const t = await exchangeCode(cfg, code, row.verifier, row.redirect_uri)
@@ -781,32 +1212,36 @@ export class OrganizerStore extends DurableObject<Env> {
       )
       this.calendarCache = null
       this.eventCache.clear()
-      const cals = await this.calendars(true)
-      const primary = cals.find((c) => c.primary)
-      let organizer = cals.find((c) => c.description?.includes(ORGANIZER_CALENDAR_MARK) && c.accessRole === 'owner')
-      if (!organizer) {
-        const created = await this.g<{ id: string }>('POST', '/calendars', {
-          body: {
-            summary: ORGANIZER_CALENDAR_NAME,
-            description: `Aufgaben mit Uhrzeit aus deinem Organizer. (${ORGANIZER_CALENDAR_MARK})`,
-            timeZone: url.searchParams.get('tz') ?? 'Europe/Berlin',
-          },
-        })
-        organizer = { id: created.id, summary: ORGANIZER_CALENDAR_NAME, accessRole: 'owner' }
-        this.calendarCache = null
-      }
-      this.sql.exec(`UPDATE google_account SET email = ?, organizer_calendar_id = ?, sync_token = NULL WHERE id = 1`, primary?.id ?? null, organizer.id)
-      // alle geplanten Aufgaben einmal übertragen
-      this.sql.exec(`UPDATE tasks SET gcal_dirty = 1 WHERE deleted_at IS NULL AND start_at IS NOT NULL`)
-      this.metaSet('gpull_at', Date.now() + 5000)
-      this.metaSet('gpush_at', Date.now() + 1000)
-      await this.scheduleAlarm()
+      await this.ensureOrganizerCalendar(await this.calendars(true))
+      this.metaSet('gconnected_at', Date.now())
       return redirect('/?google=connected')
     } catch (e) {
       console.error('google callback', e)
       const reason = e instanceof GoogleApiError ? e.reason ?? String(e.status) : 'unknown'
       return redirect(`/?google=error&reason=${encodeURIComponent(reason)}`)
     }
+  }
+
+  /** Eigenen Kalender „Organizer“ finden oder anlegen und alle geplanten Aufgaben einmal übertragen */
+  private async ensureOrganizerCalendar(cals: GCalendarListEntry[]) {
+    const primary = cals.find((c) => c.primary)
+    let organizer = cals.find((c) => c.description?.includes(ORGANIZER_CALENDAR_MARK) && c.accessRole === 'owner')
+    if (!organizer) {
+      const created = await this.g<{ id: string }>('POST', '/calendars', {
+        body: {
+          summary: ORGANIZER_CALENDAR_NAME,
+          description: `Aufgaben mit Uhrzeit aus deinem Organizer. (${ORGANIZER_CALENDAR_MARK})`,
+          timeZone: 'Europe/Berlin',
+        },
+      })
+      organizer = { id: created.id, summary: ORGANIZER_CALENDAR_NAME, accessRole: 'owner' }
+      this.calendarCache = null
+    }
+    this.sql.exec(`UPDATE google_account SET email = ?, organizer_calendar_id = ?, sync_token = NULL WHERE id = 1`, primary?.id ?? null, organizer.id)
+    this.sql.exec(`UPDATE tasks SET gcal_dirty = 1 WHERE deleted_at IS NULL AND start_at IS NOT NULL`)
+    this.metaSet('gpull_at', Date.now() + 5000)
+    this.metaSet('gpush_at', Date.now() + 1000)
+    await this.scheduleAlarm()
   }
 
   private async googleDisconnect() {
@@ -840,11 +1275,15 @@ export class OrganizerStore extends DurableObject<Env> {
     const from = url.searchParams.get('from')
     const to = url.searchParams.get('to')
     if (!isDate(from) || !isDate(to) || daysBetween(from, to) < 0 || daysBetween(from, to) > 62) throw new HttpError(400, 'Ungültiger Zeitraum')
+    return { events: await this.fetchEvents(from, to) }
+  }
+
+  private async fetchEvents(from: string, to: string): Promise<CalendarEventOut[]> {
     const acc = this.account()
-    if (!acc || !this.cfg() || acc.status !== 'ok') return { events: [] }
+    if (!acc || !this.cfg() || acc.status !== 'ok') return []
     const key = `${from}|${to}`
     const hit = this.eventCache.get(key)
-    if (hit && Date.now() - hit.at < 90_000) return { events: hit.data }
+    if (hit && Date.now() - hit.at < 90_000) return hit.data
 
     const selected: string[] | null = acc.selected_calendars ? JSON.parse(acc.selected_calendars) : null
     const cals = (await this.calendars()).filter((c) => c.id !== acc.organizer_calendar_id && (selected ? selected.includes(c.id) : c.selected || c.primary))
@@ -884,7 +1323,7 @@ export class OrganizerStore extends DurableObject<Env> {
     }
     this.eventCache.set(key, { at: Date.now(), data: events })
     if (this.eventCache.size > 20) this.eventCache.delete(this.eventCache.keys().next().value!)
-    return { events }
+    return events
   }
 
   // -------------------------------------------------------------------------
@@ -925,7 +1364,7 @@ export class OrganizerStore extends DurableObject<Env> {
               end: { dateTime: t.end_at, timeZone: t.timezone ?? 'UTC' },
               extendedProperties: { private: { organizerTaskId: t.id } },
               // Erinnerung aufs Handy 10 Minuten vorher (über die Google-Kalender-App), erledigte ohne
-              reminders: { useDefault: false, overrides: t.status === 'done' ? [] : [{ method: 'popup', minutes: 10 }] },
+              reminders: { useDefault: false, overrides: t.status === 'done' || this.hasPush() ? [] : [{ method: 'popup', minutes: 10 }] },
             }
             let ev: GEvent | null = null
             if (eventId) {
@@ -1128,6 +1567,9 @@ type TaskFields = {
   sort: number
   completed_at: string | null
   origin_event_id: string | null
+  deadline: string | null
+  blocked_by: string[]
+  estimate: number | null
 }
 
 const DEFAULT_TASK = (): Omit<TaskFields, 'title'> => ({
@@ -1146,4 +1588,51 @@ const DEFAULT_TASK = (): Omit<TaskFields, 'title'> => ({
   sort: Date.now(),
   completed_at: null,
   origin_event_id: null,
+  deadline: null,
+  blocked_by: [],
+  estimate: null,
 })
+
+// ---------------------------------------------------------------------------
+type TemplateRow = { id: string; name: string; payload: string; created_at: string; updated_at: string; deleted_at: string | null; seq: number }
+
+function safeJson(v: string): unknown {
+  try {
+    return JSON.parse(v)
+  } catch {
+    return null
+  }
+}
+
+function templateOut(r: TemplateRow) {
+  return { id: r.id, name: r.name, payload: safeJson(r.payload), created_at: r.created_at, updated_at: r.updated_at }
+}
+
+interface TemplateNode {
+  title: string
+  notes?: string | null
+  priority?: number
+  tags?: string[]
+  rrule?: string | null
+  subtasks?: TemplateNode[]
+}
+
+/** Vorlage prüfen: Titel, optionale Felder, Unteraufgaben bis 3 Ebenen, höchstens 100 Einträge */
+function cleanTemplatePayload(v: unknown): TemplateNode {
+  let count = 0
+  const walk = (n: unknown, depth: number): TemplateNode => {
+    if (!n || typeof n !== 'object') throw new HttpError(400, 'Ungültige Vorlage')
+    if (++count > 100) throw new HttpError(400, 'Vorlage zu groß')
+    const o = n as Record<string, unknown>
+    const title = typeof o.title === 'string' ? o.title.trim().slice(0, 500) : ''
+    if (!title) throw new HttpError(400, 'Vorlage ohne Titel')
+    const out: TemplateNode = { title }
+    if (typeof o.notes === 'string' && o.notes.length <= 20000) out.notes = o.notes
+    if (Number.isInteger(o.priority) && (o.priority as number) >= 1 && (o.priority as number) <= 4) out.priority = o.priority as number
+    if (Array.isArray(o.tags)) out.tags = o.tags.filter((t): t is string => typeof t === 'string' && t.length <= 40).slice(0, 30)
+    if (typeof o.rrule === 'string' && o.rrule.length <= 200) out.rrule = o.rrule
+    if (Array.isArray(o.subtasks) && depth < 3) out.subtasks = o.subtasks.map((c) => walk(c, depth + 1))
+    return out
+  }
+  return walk(v, 0)
+}

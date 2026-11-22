@@ -1,4 +1,4 @@
-import type { CalendarEvent, GoogleStatus, List, Task, TaskPatch } from './types'
+import type { CalendarEvent, GoogleStatus, List, Prefs, Task, TaskPatch, Template, TemplateNode } from './types'
 
 export class ApiError extends Error {
   constructor(
@@ -14,13 +14,27 @@ export const setUnauthorizedHandler = (fn: () => void) => {
   onUnauthorized = fn
 }
 
+let currentOpId: string | null = null
+/** Schickt die Anfragen in fn mit einer Änderungs-id, damit der Server Wiederholungen erkennt */
+export function withOpId<T>(opId: string, fn: () => Promise<T>): Promise<T> {
+  currentOpId = opId
+  try {
+    return fn()
+  } finally {
+    currentOpId = null
+  }
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = {}
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  if (currentOpId) headers['X-Op-Id'] = currentOpId
   let res: Response
   try {
     res = await fetch(path, {
       method,
       credentials: 'same-origin',
-      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
   } catch {
@@ -39,6 +53,9 @@ export interface SyncResult {
   tasks: Task[]
   deletedListIds: string[]
   deletedTaskIds: string[]
+  templates: Template[]
+  deletedTemplateIds: string[]
+  prefs: Prefs
 }
 
 export type NewTaskBody = TaskPatch & { id: string; title: string }
@@ -60,6 +77,16 @@ export const api = {
   createList: (l: Pick<List, 'id' | 'name' | 'color' | 'sort'>) => request<List>('POST', '/api/lists', l),
   updateList: (id: string, patch: Partial<Pick<List, 'name' | 'color' | 'sort' | 'archived'>>) => request<List>('PATCH', `/api/lists/${id}`, patch),
   deleteList: (id: string) => request<{ ok: true }>('DELETE', `/api/lists/${id}`),
+
+  saveTemplate: (id: string, create: boolean, data: { name?: string; payload?: TemplateNode }) =>
+    create ? request<Template>('POST', '/api/templates', { id, ...data }) : request<Template>('PATCH', `/api/templates/${id}`, data),
+  deleteTemplate: (id: string) => request<{ ok: true }>('DELETE', `/api/templates/${id}`),
+  setPref: (key: string, value: unknown) => request<{ ok: true }>('PUT', `/api/prefs/${key}`, { value }),
+
+  pushKey: () => request<{ publicKey: string }>('GET', '/api/push/key'),
+  pushSubscribe: (endpoint: string, timezone: string) => request<{ ok: true }>('POST', '/api/push/subscribe', { endpoint, timezone }),
+  pushUnsubscribe: (endpoint: string) => request<{ ok: true }>('POST', '/api/push/unsubscribe', { endpoint }),
+  pushTest: () => request<{ sent: number }>('POST', '/api/push/test'),
 
   googleStatus: () => request<GoogleStatus>('GET', '/api/google/status'),
   googleEvents: (from: string, to: string) => request<{ events: CalendarEvent[] }>('GET', `/api/google/events?from=${from}&to=${to}`),

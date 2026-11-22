@@ -13,6 +13,10 @@ import QuickAdd from './components/QuickAdd'
 import Triage from './components/Triage'
 import SettingsSheet from './components/SettingsSheet'
 import Toast from './components/Toast'
+import Ritual from './components/Ritual'
+import CommandPalette from './components/CommandPalette'
+import TemplatePicker from './components/TemplatePicker'
+import { FilterPanel } from './components/FilterBar'
 import { todayStr } from './lib/dates'
 
 const ORDER: ViewName[] = ['board', 'today', 'calendar']
@@ -30,14 +34,21 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       const s = useStore.getState()
       if (!s.authed) return
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        s.setPalette(!s.paletteOpen)
+        return
+      }
       const typing = (e.target as HTMLElement).closest('input, textarea, select, [contenteditable]')
       if (typing || e.metaKey || e.ctrlKey || e.altKey) return
-      if (s.quickAdd.open || s.triageOpen || s.selectedId || s.settingsOpen) return
+      if (s.quickAdd.open || s.triageOpen || s.selectedId || s.settingsOpen || s.paletteOpen || s.ritual || s.templatePicker || s.filterOpen) return
       if (e.key === 'n' || e.key === 'q') {
         e.preventDefault()
         s.openQuickAdd(s.view === 'today' ? { due_date: s.focusDay } : {})
       } else if (e.key === '1' || e.key === '2' || e.key === '3') s.setView(ORDER[Number(e.key) - 1])
       else if (e.key === 't') s.setFocusDay(todayStr())
+      else if (e.key === 'f' && s.view !== 'calendar') s.setFilterOpen(true)
+      else if (e.key === 'u') s.setShowSubtasks(!s.showSubtasks)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -77,6 +88,10 @@ export default function App() {
           <QuickAdd />
           <Triage />
           <SettingsSheet />
+          <Ritual />
+          <TemplatePicker />
+          <FilterPanel />
+          <CommandPalette />
           <Toast />
         </div>
       )}
