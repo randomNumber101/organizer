@@ -166,6 +166,17 @@ function GoogleSection() {
             ))}
           </div>
           <p className="muted small">Aufgaben mit Uhrzeit stehen im Google-Kalender „Organizer“. Verschiebst du sie dort, zieht die App mit.</p>
+          {google.events?.granted ? (
+            <p className="muted small">Termine kannst du direkt im Kalender anlegen, verschieben und ändern (in allen Kalendern mit Schreibrecht).</p>
+          ) : (
+            <p className="small">
+              Termine hier anlegen und ändern: dafür einmal{' '}
+              <button className="link" onClick={connect}>
+                neu verbinden
+              </button>{' '}
+              (neue Berechtigung „Termine bearbeiten“).
+            </p>
+          )}
           <div>
             <button
               className={`btn sm danger ${confirm ? 'confirm' : 'ghost'}`}
@@ -356,7 +367,14 @@ function NotifySection() {
         {state !== 'loading' && state !== 'unsupported' && (
           <div className="notify-grid">
             <label>
-              <span>Vor Aufgaben mit Uhrzeit</span>
+              <span>Vor Google-Terminen</span>
+              <select value={p.events === false ? 'off' : 'on'} onChange={(e) => set({ events: e.target.value === 'on' })}>
+                <option value="on">ja (gleicher Abstand)</option>
+                <option value="off">nein</option>
+              </select>
+            </label>
+            <label>
+              <span>Vor Aufgaben &amp; Terminen</span>
               <select value={p.lead} onChange={(e) => set({ lead: Number(e.target.value) })}>
                 <option value={0}>beim Start</option>
                 {[5, 10, 15, 30, 60].map((m) => (

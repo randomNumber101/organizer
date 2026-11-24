@@ -1,6 +1,7 @@
 export type Horizon = 'backlog' | 'short' | 'long'
 export type Status = 'open' | 'done'
-export type Priority = 1 | 2 | 3 | 4
+/** Wichtigkeit: 0 = keine … 5 = dringend */
+export type Priority = 0 | 1 | 2 | 3 | 4 | 5
 
 export interface List {
   id: string
@@ -45,6 +46,8 @@ export interface Task {
   gtask_id?: string | null
   /** Reihenfolge innerhalb des Tages (null = noch nicht einsortiert) */
   day_order: number | null
+  /** Teil einer aufgeteilten Aufgabe (1, 2, 3 … unter der Hauptaufgabe); null = normale Aufgabe */
+  part_index: number | null
   created_at: string
   updated_at: string
 }
@@ -66,6 +69,36 @@ export interface CalendarEvent {
   color: string
   location: string | null
   link: string | null
+  description?: string | null
+  /** darf geändert werden */
+  writable?: boolean
+  colorId?: string | null
+  /** gehört zu einer Serie (id des Ursprungstermins) */
+  recurringId?: string | null
+  meet?: string | null
+  guests?: number
+  /** lokal angelegt, wartet noch auf Google */
+  pending?: boolean
+}
+
+export type CalView = 'day' | '3day' | 'week' | 'month' | 'year' | 'list'
+
+/** Termin anlegen/ändern */
+export interface EventInput {
+  calendarId: string
+  title: string
+  allDay: boolean
+  /** ISO bzw. YYYY-MM-DD */
+  start: string
+  /** ISO bzw. YYYY-MM-DD (exklusiv) */
+  end: string
+  timeZone?: string
+  location?: string | null
+  description?: string | null
+  colorId?: string | null
+  recurrence?: string | null
+  /** Minuten vorher (null = Standard des Kalenders) */
+  reminders?: number[] | null
 }
 
 export interface GoogleCalendarInfo {
@@ -74,6 +107,7 @@ export interface GoogleCalendarInfo {
   color: string
   primary: boolean
   selected: boolean
+  writable?: boolean
 }
 
 export interface GoogleStatus {
@@ -84,6 +118,8 @@ export interface GoogleStatus {
   calendars?: GoogleCalendarInfo[]
   /** Google Aufgaben: Berechtigung erteilt, eingeschaltet, letzter Fehler */
   tasks?: { granted: boolean; enabled: boolean; problem: string | null }
+  /** Termine bearbeiten erlaubt (Berechtigung calendar.events) */
+  events?: { granted: boolean }
 }
 
 export const HORIZON_LABEL: Record<Horizon, string> = {
@@ -93,11 +129,19 @@ export const HORIZON_LABEL: Record<Horizon, string> = {
 }
 
 export const PRIORITY_LABEL: Record<Priority, string> = {
-  1: 'Hoch',
-  2: 'Mittel',
-  3: 'Niedrig',
-  4: 'Keine',
+  5: 'Dringend',
+  4: 'Hoch',
+  3: 'Mittel',
+  2: 'Niedrig',
+  1: 'Sehr niedrig',
+  0: 'Keine',
 }
+
+/** von wichtig nach unwichtig */
+export const PRIORITIES: Priority[] = [5, 4, 3, 2, 1, 0]
+
+/** ab dieser Stufe gilt eine Aufgabe als „wichtig“ (Vorschläge, Sortierung) */
+export const IMPORTANT = 3
 
 export const LIST_COLORS = ['#3f6f5f', '#4a6fa5', '#b6583e', '#b88a2a', '#7b5ea7', '#3b8a8c', '#a24d6f', '#6b7280']
 
@@ -139,6 +183,8 @@ export interface PushPrefs {
   morning: string | null
   evening: string | null
   lead: number
+  /** auch vor Google-Terminen erinnern (Standard: an) */
+  events?: boolean
 }
 
 export type TodayMode = 'order' | 'duration' | 'prio'
@@ -150,4 +196,6 @@ export interface Prefs {
   /** Tagesende für „noch frei“ in Heute (HH:mm) */
   day?: { end?: string }
   board?: Record<string, unknown>
+  /** Kalender: eigene Farben je Kalender, Wochennummern, Standard-Kalender für neue Termine */
+  calendar?: { colors?: Record<string, string>; weekNumbers?: boolean; defaultCalendar?: string | null }
 }

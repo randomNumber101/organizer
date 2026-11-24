@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion, useDragControls } from 'motion/react'
-import { CalendarDays, Clock, Flag, Folder, Hash, Mountain, Repeat, Trash2, X, CornerLeftUp, CalendarCheck2, Lock, Plus, Hourglass, LayoutTemplate, Link2 } from 'lucide-react'
+import { CalendarDays, Clock, Flag, Folder, Hash, Mountain, Repeat, Trash2, X, CornerLeftUp, CalendarCheck2, Lock, Plus, Hourglass, LayoutTemplate, Link2, CheckCheck, Scissors, GripVertical } from 'lucide-react'
 import { useStore } from '../store'
 import type { Horizon, Priority, TaskPatch } from '../lib/types'
-import { HORIZON_LABEL, LIST_COLORS, PRIORITY_LABEL } from '../lib/types'
-import { addDaysStr, durationLabel, isoFromDayMinutes, minutesBetween, minutesOfDay, nextWeekdayStr, todayStr, hhmm } from '../lib/dates'
+import { HORIZON_LABEL, LIST_COLORS } from '../lib/types'
+import PrioPicker from './PrioPicker'
+import { addDaysStr, dayLabel, durationLabel, isoFromDayMinutes, minutesBetween, minutesOfDay, nextWeekdayStr, todayStr, hhmm } from '../lib/dates'
 import { ancestors, childrenOf, descendantIds } from '../lib/tree'
 import { dependents, wouldCycle } from '../lib/blocking'
 import { deadlineDay, deadlineState, deadlineTime } from '../lib/filter'
@@ -14,6 +15,16 @@ import { applyToTask, composeTask } from '../lib/compose'
 import { PRESET_LABEL, PRESET_RRULE, presetOf, repeatLabel, type RepeatPreset } from '../../shared/recurrence'
 import { useIsMobile } from '../hooks/useMedia'
 import Check from './Check'
+import { PartBadge, PartProgress } from './PartBadge'
+import { hasParts, isPart } from '../lib/parts'
+import { minutesText } from '../lib/dayplan'
+import { sortBetween } from '../lib/order'
+import { justDragged, markDragEnd } from '../lib/drag'
+import { DndContext, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
+import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import { GripKeyboardSensor, GripPointerSensor, RowMouseSensor, RowTouchSensor } from './DayList'
+import type { Task } from '../lib/types'
 
 const DURATIONS = [15, 30, 45, 60, 90, 120, 180, 240]
 
@@ -70,7 +81,7 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
   const task = useStore((s) => s.tasks[id])
   const tasks = useStore((s) => s.tasks)
   const lists = useStore((s) => s.lists)
-  const { updateTask, toggleDone, deleteTask, select, createTask, createList, moveToDay, setBlockers, saveAsTemplate, showToast } = useStore.getState()
+  const { updateTask, toggleDone, deleteTask, select, createTask, createList, moveToDay, setBlockers, saveAsTemplate, showToast, openSplit } = useStore.getState()
   const [title, setTitle] = useState(task?.title ?? '')
   const [notes, setNotes] = useState(task?.notes ?? '')
   const [tagInput, setTagInput] = useState('')
@@ -198,6 +209,27 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
           </div>
         )}
         {task.rollover_count > 0 && task.status === 'open' && <p className="chip warn" style={{ alignSelf: 'flex-start', height: 24 }}>Schon {task.rollover_count}× auf den nächsten Tag geschoben</p>}
+        {(isPart(task) || hasParts(tasks, id) || (task.status === 'open' && !task.rrule)) && (
+          <div className="sheet-parts">
+            {isPart(task) && tasks[task.parent_id!] && (
+              <button className="sheet-part-of" onClick={() => select(task.parent_id!)}>
+                <PartBadge task={task} /> von „{tasks[task.parent_id!].title}“
+              </button>
+            )}
+            {hasParts(tasks, id) && <PartProgress task={task} />}
+            <span style={{ flex: 1 }} />
+            {task.status === 'open' && !task.rrule && (
+              <>
+                <button className="btn sm ghost" onClick={() => openSplit(id, 'log')} title="Geschaffte Zeit abhaken, der Rest bleibt als nächster Teil">
+                  <CheckCheck size={15} /> Teil erledigt
+                </button>
+                <button className="btn sm ghost" onClick={() => openSplit(id, 'split')} title="In mehrere Teile (Sitzungen) aufteilen">
+                  <Scissors size={15} /> Aufteilen
+                </button>
+              </>
+            )}
+          </div>
+        )}
 
         <div className="props">
           <span className="prop-label">
@@ -340,12 +372,7 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
             <Flag /> Priorität
           </span>
           <div className="prop-value">
-            {([1, 2, 3, 4] as Priority[]).map((p) => (
-              <button key={p} className={`opt prio-${p} ${task.priority === p ? 'on' : ''}`} onClick={() => void updateTask(id, { priority: p })}>
-                {p < 4 && <Flag />}
-                {PRIORITY_LABEL[p]}
-              </button>
-            ))}
+            <PrioPicker value={task.priority} onChange={(p: Priority) => void updateTask(id, { priority: p })} />
           </div>
 
           {!task.due_date && (
@@ -417,17 +444,7 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
             )}
           </div>
           <div className="subtasks">
-            <AnimatePresence initial={false}>
-              {kids.map((k) => (
-                <motion.div key={k.id} layout="position" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className={`subtask ${k.status === 'done' ? 'done' : ''}`}>
-                  <Check done={k.status === 'done'} priority={k.priority} onToggle={() => void toggleDone(k.id)} />
-                  <button className="s-title" onClick={() => select(k.id)}>
-                    {k.title}
-                  </button>
-                  {childrenOf(tasks, k.id).length > 0 && <span className="chip">{childrenOf(tasks, k.id).length}</span>}
-                </motion.div>
-              ))}
-            </AnimatePresence>
+            <SubtaskList parent={task} kids={kids} />
             <div className="add-sub">
               <span className="check small" style={{ borderStyle: 'dashed' }} />
               <SmartField value={subInput} onChange={setSubInput} tokens={subParse.parsed.tokens} placeholder="Unteraufgabe hinzufügen" onSubmit={addSub} onCancel={() => setSubInput('')} className="sub-field" self={id} />
@@ -526,5 +543,86 @@ function SheetContent({ id, onGrab }: { id: string; onGrab: (e: React.PointerEve
         </div>
       </div>
     </>
+  )
+}
+
+/** Unteraufgaben im Blatt: ziehen ändert die Reihenfolge (Teile bleiben in ihrer Reihenfolge oben) */
+function SubtaskList({ parent, kids }: { parent: Task; kids: Task[] }) {
+  const tasks = useStore((s) => s.tasks)
+  const updateTask = useStore((s) => s.updateTask)
+  const setDragging = useStore((s) => s.setDragging)
+  const sensors = useSensors(
+    useSensor(RowMouseSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(RowTouchSensor, { activationConstraint: { delay: 230, tolerance: 8 } }),
+    useSensor(GripPointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(GripKeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
+  const parts = kids.filter(isPart)
+  const others = kids.filter((k) => !isPart(k))
+  const ids = others.map((k) => k.id)
+  const onDragEnd = ({ active, over }: DragEndEvent) => {
+    setDragging(false)
+    markDragEnd()
+    if (!over || active.id === over.id) return
+    const next = arrayMove(ids, ids.indexOf(String(active.id)), ids.indexOf(String(over.id)))
+    const i = next.indexOf(String(active.id))
+    updateTask(String(active.id), { sort: sortBetween(tasks[next[i - 1]]?.sort, tasks[next[i + 1]]?.sort) })
+  }
+  return (
+    <>
+      {parts.map((k, i) => (
+        <SubRow key={k.id} task={k} label={`Teil ${i + 1}`} parentTitle={parent.title} />
+      ))}
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={() => setDragging(true)} onDragEnd={onDragEnd} onDragCancel={() => setDragging(false)}>
+        <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+          {others.map((k) => (
+            <SortableSub key={k.id} task={k} />
+          ))}
+        </SortableContext>
+      </DndContext>
+    </>
+  )
+}
+
+function SortableSub({ task }: { task: Task }) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id: task.id })
+  const { role: _r, tabIndex: _t, ...attrs } = attributes
+  return (
+    <div ref={setNodeRef} style={{ transform: CSS.Translate.toString(transform), transition, position: 'relative', zIndex: isDragging ? 5 : undefined }} className={`sub-sortable ${isDragging ? 'is-dragging' : ''}`} {...attrs} {...listeners}>
+      <SubRow
+        task={task}
+        grip={
+          <button ref={setActivatorNodeRef} className="day-grip" aria-label={`„${task.title}“ verschieben`}>
+            <GripVertical size={14} />
+          </button>
+        }
+      />
+    </div>
+  )
+}
+
+function SubRow({ task: k, label, parentTitle, grip }: { task: Task; label?: string; parentTitle?: string; grip?: React.ReactNode }) {
+  const tasks = useStore((s) => s.tasks)
+  const toggleDone = useStore((s) => s.toggleDone)
+  const select = useStore((s) => s.select)
+  const n = childrenOf(tasks, k.id).length
+  return (
+    <div className={`subtask ${k.status === 'done' ? 'done' : ''} ${label ? 'part' : ''}`}>
+      {grip}
+      <Check done={k.status === 'done'} priority={k.priority} onToggle={() => void toggleDone(k.id)} />
+      <button className="s-title" onClick={() => !justDragged() && select(k.id)}>
+        {label ? (
+          <>
+            <span className="sub-part-no">{label}</span>
+            {k.title !== parentTitle && ` ${k.title}`}
+            {k.estimate ? <span className="sub-part-meta">{minutesText(k.estimate)}</span> : null}
+            {k.due_date ? <span className="sub-part-meta">{dayLabel(k.due_date)}</span> : <span className="sub-part-meta">ohne Tag</span>}
+          </>
+        ) : (
+          k.title
+        )}
+      </button>
+      {n > 0 && <span className="chip">{n}</span>}
+    </div>
   )
 }

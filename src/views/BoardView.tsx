@@ -23,7 +23,7 @@ import {
 import { SortableContext, arrayMove, horizontalListSortingStrategy, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { AnimatePresence, motion } from 'motion/react'
-import { ChevronRight, Columns3, Inbox, LayoutList, LayoutTemplate, ListChecks, MoreHorizontal, Pencil, Plus, Shuffle, Trash2 } from 'lucide-react'
+import { ChevronRight, Columns3, Inbox, LayoutList, LayoutTemplate, ListChecks, MoreHorizontal, Pencil, Plus, Scissors, Shuffle, Trash2 } from 'lucide-react'
 import { useStore } from '../store'
 import type { BoardMode, List, Task, TaskPatch } from '../lib/types'
 import { LIST_COLORS } from '../lib/types'
@@ -38,6 +38,8 @@ import Segmented from '../components/Segmented'
 import { FilterBar } from '../components/FilterBar'
 import SmartField, { TokenChips } from '../components/SmartField'
 import { matchesFilter } from '../lib/filter'
+import { dayCompare } from '../lib/dayplan'
+import { useSplitKey } from '../components/DayList'
 
 // ---------------------------------------------------------------------------
 // Spalten
@@ -59,12 +61,6 @@ interface ColumnDef {
 }
 
 const bySort = (a: Task, b: Task) => a.sort - b.sort || a.created_at.localeCompare(b.created_at)
-const byTimeThenSort = (a: Task, b: Task) => {
-  if (a.start_at && b.start_at) return a.start_at.localeCompare(b.start_at)
-  if (a.start_at) return -1
-  if (b.start_at) return 1
-  return bySort(a, b)
-}
 const recentDone = (t: Task) => t.status === 'done' && !!t.completed_at && Date.now() - Date.parse(t.completed_at) < 14 * 86_400_000
 const byCompleted = (a: Task, b: Task) => (b.completed_at ?? '').localeCompare(a.completed_at ?? '')
 
@@ -134,7 +130,7 @@ function useColumns(mode: BoardMode): ColumnDef[] {
         title: i === 0 ? 'Heute' : i === 1 ? 'Morgen' : weekdayShort(day),
         sub: shortDate(day),
         isToday: i === 0,
-        tasks: dated.filter((t) => t.status === 'open' && (t.due_date === day || (i === 0 && t.due_date! < today))).sort(byTimeThenSort),
+        tasks: dated.filter((t) => t.status === 'open' && (t.due_date === day || (i === 0 && t.due_date! < today))).sort(dayCompare),
         done: dated.filter((t) => t.due_date === day && recentDone(t)).sort(byCompleted),
         assign: (t) => (t.start_at && t.end_at ? { ...moveBlockToDate(t.start_at, t.end_at, t.timezone ?? deviceTimeZone(), day), timezone: t.timezone ?? deviceTimeZone() } : { due_date: day }),
         defaults: { due_date: day },
@@ -158,12 +154,15 @@ export default function BoardView() {
   const updateTask = useStore((s) => s.updateTask)
   const updateList = useStore((s) => s.updateList)
   const setDragging = useStore((s) => s.setDragging)
+  const setDayOrder = useStore((s) => s.setDayOrder)
+  const splitOff = useStore((s) => s.splitOff)
   const showSubtasks = useStore((s) => s.showSubtasks)
   const setShowSubtasks = useStore((s) => s.setShowSubtasks)
   const columns = useColumns(mode)
 
   const [items, setItems] = useState<Record<string, string[]> | null>(null)
   const [active, setActive] = useState<{ id: string; type: 'card' | 'column' } | null>(null)
+  const [splitKey, setSplitKey] = useSplitKey(active?.type === 'card' && mode === 'week')
   const startCol = useRef<string | null>(null)
   const lastOver = useRef<UniqueIdentifier | null>(null)
 
@@ -214,7 +213,7 @@ export default function BoardView() {
     [active, order],
   )
 
-  const onDragStart = ({ active: a }: DragStartEvent) => {
+  const onDragStart = ({ active: a, activatorEvent }: DragStartEvent) => {
     const id = String(a.id)
     haptic(12)
     setDragging(true)
@@ -225,10 +224,12 @@ export default function BoardView() {
     setActive({ id, type: 'card' })
     setItems(baseItems)
     startCol.current = findContainer(id)
+    const ev = activatorEvent as MouseEvent | null
+    setSplitKey(mode === 'week' && !!ev && (ev.ctrlKey || ev.metaKey || ev.altKey))
   }
 
   const onDragOver = ({ active: a, over }: DragOverEvent) => {
-    if (!over || active?.type !== 'card') return
+    if (!over || active?.type !== 'card' || splitKey) return
     const activeId = String(a.id)
     const overId = String(over.id)
     const from = findContainer(activeId)
@@ -277,6 +278,13 @@ export default function BoardView() {
     const to = findContainer(String(over.id))
     const from = startCol.current
     if (!to || !from) return finish()
+    // Woche + Strg: einen Teil abspalten und auf den Ziel-Tag legen
+    if (splitKey && mode === 'week') {
+      const col = colById[to]
+      if (col?.kind === 'day' && splitOff(id, { due_date: to, day_order: null })) haptic([10, 40, 10])
+      else if (col?.kind === 'nodate') splitOff(id, { due_date: null })
+      return finish()
+    }
     let ids = [...(order[to] ?? [])]
     const oldIndex = ids.indexOf(id)
     const overIndex = ids.indexOf(String(over.id))
@@ -285,9 +293,15 @@ export default function BoardView() {
     const task = tasks[id]
     const unchanged = from === to && baseItems[to]?.indexOf(id) === idx
     if (task && !unchanged) {
-      const sort = sortBetween(tasks[ids[idx - 1]]?.sort, tasks[ids[idx + 1]]?.sort)
-      const patch: TaskPatch = { sort, ...(from !== to ? colById[to].assign(task) : {}) }
-      void updateTask(id, patch)
+      if (colById[to]?.kind === 'day') {
+        // Tages-Spalten teilen sich die Reihenfolge mit „Heute“
+        if (from !== to) void updateTask(id, colById[to].assign(task))
+        setDayOrder(ids, id)
+      } else {
+        const sort = sortBetween(tasks[ids[idx - 1]]?.sort, tasks[ids[idx + 1]]?.sort)
+        const patch: TaskPatch = { sort, ...(from !== to ? colById[to].assign(task) : {}) }
+        void updateTask(id, patch)
+      }
       haptic(8)
     }
     finish()
@@ -347,8 +361,13 @@ export default function BoardView() {
         {createPortal(
           <DragOverlay dropAnimation={{ duration: 220, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' }}>
             {activeTask ? (
-              <motion.div initial={{ rotate: 0, scale: 1 }} animate={{ rotate: 1.6, scale: 1.03 }} transition={{ type: 'spring', stiffness: 400, damping: 25 }}>
+              <motion.div className={`card-overlay-wrap ${splitKey ? 'splitting' : ''}`} initial={{ rotate: 0, scale: 1 }} animate={{ rotate: 1.6, scale: 1.03 }} transition={{ type: 'spring', stiffness: 400, damping: 25 }}>
                 <TaskCard task={activeTask} overlay showList={mode === 'week'} />
+                {splitKey && (
+                  <span className="split-flag">
+                    <Scissors size={12} /> Teil abspalten
+                  </span>
+                )}
               </motion.div>
             ) : activeCol ? (
               <div className="col col-overlay" style={{ height: 120 }}>

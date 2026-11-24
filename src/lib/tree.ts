@@ -34,13 +34,14 @@ export function ancestors(tasks: Record<string, Task>, task: Task): Task[] {
   return out
 }
 
-/** offene vor erledigten; Zeitblöcke nach Uhrzeit; dann Priorität; dann Sortierung/Erstellung */
+/** offene vor erledigten; Zeitblöcke nach Uhrzeit; dann die eigene Reihenfolge (ziehen); dann Erstellung */
 export function compareTasks(a: Task, b: Task): number {
+  // Teile einer Aufgabe stehen immer in ihrer Reihenfolge (Teil 1, Teil 2 …)
+  if (a.part_index != null && b.part_index != null && a.parent_id === b.parent_id) return a.part_index - b.part_index
   if (a.status !== b.status) return a.status === 'open' ? -1 : 1
   if (a.start_at && b.start_at) return a.start_at.localeCompare(b.start_at)
   if (a.start_at) return -1
   if (b.start_at) return 1
-  if (a.priority !== b.priority) return a.priority - b.priority
   if (a.sort !== b.sort) return a.sort - b.sort
   return a.created_at.localeCompare(b.created_at)
 }

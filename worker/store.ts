@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers'
-import { MIGRATIONS } from './migrations'
+import { MIGRATIONS, upgradePrio } from './migrations'
 import { login, logout, requireSession } from './auth'
 import { HttpError, cleanListInput, cleanTaskInput, dateInZone, isDate, isUuid, listOut, normalizeTask, taskOut, type ListRow, type TaskRow } from './db'
 import {
@@ -17,11 +17,13 @@ import {
   revokeToken,
   SCOPES,
   TASKS_SCOPE,
+  EVENTS_SCOPE,
   type ApiOpts,
   type GTask,
   type GTaskList,
   type GCalendarListEntry,
   type GEvent,
+  type GEventTime,
   type GEventList,
   type GoogleConfig,
   type GoogleEnv,
@@ -71,7 +73,7 @@ const PULL_EVERY = 10 * MIN
 const TASK_PATH = /^\/api\/tasks\/([0-9a-f-]{36})$/i
 const LIST_PATH = /^\/api\/lists\/([0-9a-f-]{36})$/i
 const TEMPLATE_PATH = /^\/api\/templates\/([0-9a-f-]{36})$/i
-const PREF_PATH = /^\/api\/prefs\/(views|push|ritual|board|day)$/
+const PREF_PATH = /^\/api\/prefs\/(views|push|ritual|board|day|calendar)$/
 
 /** Nach jeder Änderung: muss der Google-Termin der Aufgabe angepasst werden? */
 // Achtung: in SQLite sehen Ausdrücke in SET die ALTEN Spaltenwerte. Gut für Statusänderungen/Löschen,
@@ -113,6 +115,15 @@ export interface CalendarEventOut {
   color: string
   location: string | null
   link: string | null
+  description: string | null
+  /** darf geändert werden (eigener Kalender bzw. Schreibrecht) */
+  writable: boolean
+  colorId: string | null
+  /** Serie: id des Ursprungstermins */
+  recurringId: string | null
+  meet: string | null
+  /** Anzahl Gäste (ohne mich) */
+  guests: number
 }
 
 /**
@@ -148,6 +159,7 @@ export class OrganizerStore extends DurableObject<Env> {
       if (applied.has(m.id)) continue
       this.ctx.storage.transactionSync(() => {
         for (const s of m.statements) this.sql.exec(s)
+        m.run?.(this.sql)
         this.sql.exec(`INSERT INTO _migrations (id, name, applied_at) VALUES (?, ?, ?)`, m.id, m.name, nowIso())
       })
       console.log(`Migration ${m.id} (${m.name}) eingespielt`)
@@ -293,6 +305,18 @@ export class OrganizerStore extends DurableObject<Env> {
     if (pathname === '/api/google/status' && method === 'GET') return json(await this.googleStatus())
     if (pathname === '/api/google/connect' && method === 'GET') return this.googleConnect(url)
     if (pathname === '/api/google/events' && method === 'GET') return json(await this.googleEvents(url))
+    if (pathname === '/api/google/events' && method === 'POST') return json(await this.createEvent(await readJson(req)), 201)
+    if (pathname === '/api/google/events' && method === 'PATCH') return json(await this.updateEvent(await readJson(req)))
+    if (pathname === '/api/google/events/delete' && method === 'POST') {
+      const r = await this.deleteEvent(await readJson(req))
+      this.planReminders()
+      return json(r)
+    }
+    if (pathname === '/api/google/search' && method === 'GET') {
+      const q = (url.searchParams.get('q') ?? '').trim()
+      if (q.length < 2 || q.length > 100) throw new HttpError(400, 'Suchbegriff zu kurz')
+      return json(await this.searchEvents(q))
+    }
     if (pathname === '/api/google/disconnect' && method === 'POST') return json(await this.googleDisconnect())
     if (pathname === '/api/google/calendars' && method === 'POST') return json(this.googleSetCalendars(await readJson(req)))
     if (pathname === '/api/google/tasks' && method === 'POST') {
@@ -321,18 +345,25 @@ export class OrganizerStore extends DurableObject<Env> {
       if (seen) return new Response(seen.body, { status: seen.status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' } })
     }
 
+    // Ältere App-Versionen (noch im Zwischenspeicher eines Geräts) schicken Wichtigkeit 1–4 (1 = hoch) → umrechnen
+    const legacy = req.headers.get('X-Scale') !== '2'
+    const body = async () => {
+      const b = await readJson(req)
+      return legacy ? legacyBody(b) : b
+    }
+
     let out: [unknown, number] | null = null
     if (pathname === '/api/rollover' && method === 'POST') out = [this.rollover(await readJson(req)), 200]
-    else if (pathname === '/api/tasks' && method === 'POST') out = [this.createTask(await readJson(req)), 201]
+    else if (pathname === '/api/tasks' && method === 'POST') out = [this.createTask(await body()), 201]
     else if (pathname === '/api/tasks/bulk' && method === 'POST') out = [this.bulkStatus(await readJson(req)), 200]
     else if (pathname === '/api/tasks/restore' && method === 'POST') out = [this.restoreTasks(await readJson(req)), 200]
-    else if (tm && method === 'PATCH') out = [this.updateTask(tm[1], await readJson(req)), 200]
+    else if (tm && method === 'PATCH') out = [this.updateTask(tm[1], await body()), 200]
     else if (tm && method === 'DELETE') out = [this.deleteTask(tm[1]), 200]
     else if (pathname === '/api/lists' && method === 'POST') out = [this.createList(await readJson(req)), 201]
     else if (lm && method === 'PATCH') out = [this.updateList(lm[1], await readJson(req)), 200]
     else if (lm && method === 'DELETE') out = [this.deleteList(lm[1]), 200]
-    else if (pathname === '/api/templates' && method === 'POST') out = [this.saveTemplate(null, await readJson(req)), 201]
-    else if (tplm && method === 'PATCH') out = [this.saveTemplate(tplm[1], await readJson(req)), 200]
+    else if (pathname === '/api/templates' && method === 'POST') out = [this.saveTemplate(null, await body()), 201]
+    else if (tplm && method === 'PATCH') out = [this.saveTemplate(tplm[1], await body()), 200]
     else if (tplm && method === 'DELETE') out = [this.deleteTemplate(tplm[1]), 200]
     else if (prefm && method === 'PUT') out = [this.setPref(prefm[1], await readJson(req)), 200]
 
@@ -466,13 +497,14 @@ export class OrganizerStore extends DurableObject<Env> {
       JSON.stringify(t.blocked_by ?? []),
       t.estimate ?? null,
       t.day_order ?? null,
+      t.part_index ?? null,
     ]
     if (insert) {
       return this.sql
         .exec<TaskRow>(
-          `INSERT INTO tasks (list_id, parent_id, title, notes, status, priority, horizon, tags, due_date, start_at, end_at,
-             timezone, rrule, completed_at, sort, origin_event_id, deadline, blocked_by, estimate, day_order, num, id, created_at, updated_at, seq, gcal_event_id, gcal_etag, gcal_dirty, gtask_dirty)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+          `INSERT INTO tasks (list_id, parent_id, title, notes, status, prio, horizon, tags, due_date, start_at, end_at,
+             timezone, rrule, completed_at, sort, origin_event_id, deadline, blocked_by, estimate, day_order, part_index, num, id, created_at, updated_at, seq, gcal_event_id, gcal_etag, gcal_dirty, gtask_dirty)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
           ...values,
           this.nextNum(),
           id,
@@ -490,9 +522,9 @@ export class OrganizerStore extends DurableObject<Env> {
     const wantsTask = !t.start_at && t.due_date ? 1 : 0
     return this.sql
       .exec<TaskRow>(
-        `UPDATE tasks SET list_id = ?, parent_id = ?, title = ?, notes = ?, status = ?, priority = ?, horizon = ?, tags = ?,
+        `UPDATE tasks SET list_id = ?, parent_id = ?, title = ?, notes = ?, status = ?, prio = ?, horizon = ?, tags = ?,
            due_date = ?, start_at = ?, end_at = ?, timezone = ?, rrule = ?, completed_at = ?, sort = ?, origin_event_id = ?,
-           deadline = ?, blocked_by = ?, estimate = ?, day_order = ?,
+           deadline = ?, blocked_by = ?, estimate = ?, day_order = ?, part_index = ?,
            updated_at = ?, seq = ?,
            gcal_dirty = CASE WHEN ? = 1 AND (? = 1 OR gcal_event_id IS NOT NULL) THEN 1 ELSE gcal_dirty END,
            gtask_dirty = CASE WHEN ? = 1 AND (? = 1 OR gtask_id IS NOT NULL) THEN 1 ELSE gtask_dirty END
@@ -542,7 +574,18 @@ export class OrganizerStore extends DurableObject<Env> {
     return this.tx(() => {
       this.checkRefs(id, t.list_id, t.parent_id)
       this.checkBlockers(id, t.blocked_by)
-      return taskOut(this.writeTask(id, t, now, true))
+      const row = this.writeTask(id, t, now, true)
+      // neuer Teil → die anderen Teile in Google neu beschriften („Teil 1/2“ → „Teil 1/3“)
+      if (t.part_index !== null && t.parent_id) {
+        this.sql.exec(
+          `UPDATE tasks SET gcal_dirty = CASE WHEN gcal_event_id IS NOT NULL THEN 1 ELSE gcal_dirty END,
+             gtask_dirty = CASE WHEN gtask_id IS NOT NULL THEN 1 ELSE gtask_dirty END
+           WHERE parent_id = ? AND part_index IS NOT NULL AND id != ? AND deleted_at IS NULL`,
+          t.parent_id,
+          id,
+        )
+      }
+      return taskOut(row)
     })
   }
 
@@ -645,6 +688,27 @@ export class OrganizerStore extends DurableObject<Env> {
               JSON.stringify(doneIds),
             )
             .toArray(),
+        )
+      }
+      // Teile: alle erledigt → Hauptaufgabe erledigt; ein Teil wieder offen → Hauptaufgabe wieder offen
+      const parents = [...new Set(changed.filter((r) => r.part_index !== null && r.parent_id).map((r) => r.parent_id!))]
+      for (const pid of parents) {
+        const parent = this.sql.exec<TaskRow>(`SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL`, pid).toArray()[0]
+        if (!parent || parent.rrule) continue
+        const open = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM tasks WHERE parent_id = ? AND deleted_at IS NULL AND status = 'open'`, pid).one().n
+        const want = open === 0 ? 'done' : 'open'
+        if (parent.status === want || (want === 'open' && status === 'done')) continue
+        changed.push(
+          this.sql
+            .exec<TaskRow>(
+              `UPDATE tasks SET status = ?1, completed_at = CASE WHEN ?1 = 'done' THEN COALESCE(completed_at, ?2) ELSE NULL END,
+                 updated_at = ?2, seq = ?3, ${MARK_DIRTY} WHERE id = ?4 RETURNING *`,
+              want,
+              now,
+              seq,
+              pid,
+            )
+            .one(),
         )
       }
       return { tasks: changed.map(taskOut), advanced }
@@ -829,7 +893,8 @@ export class OrganizerStore extends DurableObject<Env> {
     const raw = JSON.stringify(value ?? null)
     if (raw.length > 50_000) throw new HttpError(400, 'Zu groß')
     if (key === 'push') {
-      const v = value as { morning?: unknown; evening?: unknown; lead?: unknown }
+      const v = value as { morning?: unknown; evening?: unknown; lead?: unknown; events?: unknown }
+      if (v && typeof v === 'object' && 'events' in v && typeof v.events !== 'boolean') throw new HttpError(400, 'Ungültige Benachrichtigungs-Einstellungen')
       const time = (t: unknown) => t === null || (typeof t === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(t))
       if (!v || typeof v !== 'object' || !time(v.morning ?? null) || !time(v.evening ?? null) || ![0, 5, 10, 15, 30, 60].includes(Number(v.lead ?? 10))) {
         throw new HttpError(400, 'Ungültige Benachrichtigungs-Einstellungen')
@@ -878,9 +943,9 @@ export class OrganizerStore extends DurableObject<Env> {
     return this.sql.exec(`SELECT 1 FROM push_subscriptions LIMIT 1`).toArray().length > 0
   }
 
-  private pushSettings(): { morning: string | null; evening: string | null; lead: number } {
-    const p = this.pref<{ morning?: string | null; evening?: string | null; lead?: number }>('push', {})
-    return { morning: p.morning === undefined ? '08:00' : p.morning, evening: p.evening ?? null, lead: p.lead ?? 10 }
+  private pushSettings(): { morning: string | null; evening: string | null; lead: number; events: boolean } {
+    const p = this.pref<{ morning?: string | null; evening?: string | null; lead?: number; events?: boolean }>('push', {})
+    return { morning: p.morning === undefined ? '08:00' : p.morning, evening: p.evening ?? null, lead: p.lead ?? 10, events: p.events !== false }
   }
 
   private async pushSubscribe(req: Request, body: unknown) {
@@ -989,6 +1054,13 @@ export class OrganizerStore extends DurableObject<Env> {
       const at = Date.parse(r.start_at) - p.lead * MIN
       if (at > now - 5 * MIN && !this.wasSent(`t:${r.id}:${r.start_at}`)) due.push(Math.max(at, now))
     }
+    // Google-Termine (Kalender-App-Ersatz)
+    if (p.events) {
+      for (const e of this.upcomingEvents()) {
+        const at = Date.parse(e.start) - p.lead * MIN
+        if (at > now - 5 * MIN && !this.wasSent(`ev:${e.cal}:${e.id}:${e.start}`)) due.push(Math.max(at, now))
+      }
+    }
     // Fristen mit Uhrzeit: eine Stunde vorher
     for (const r of this.timedDeadlines()) {
       const at = zonedToUtc(r.deadline.slice(0, 10), r.deadline.slice(11), tz) - DEADLINE_LEAD
@@ -1047,6 +1119,23 @@ export class OrganizerStore extends DurableObject<Env> {
         tag: `task-${t.id}`,
       })
       mark.push(key)
+    }
+    if (p.events) {
+      for (const e of this.upcomingEvents()) {
+        const key = `ev:${e.cal}:${e.id}:${e.start}`
+        const start = Date.parse(e.start)
+        if (this.wasSent(key) || !(start - p.lead * MIN <= now + 30_000 && start > now - 5 * MIN)) continue
+        const mins = Math.round((start - now) / MIN)
+        const { time } = utcToZoned(start, tz)
+        const end = utcToZoned(Date.parse(e.end), tz).time
+        items.push({
+          title: e.title,
+          body: [mins > 1 ? `in ${mins} Min.` : 'jetzt', `${time}–${end}`, e.location].filter(Boolean).join(' · '),
+          url: `/?view=calendar&day=${utcToZoned(start, tz).date}`,
+          tag: `event-${e.id}`,
+        })
+        mark.push(key)
+      }
     }
     for (const r of this.timedDeadlines()) {
       const key = `d:${r.id}:${r.deadline}`
@@ -1180,6 +1269,7 @@ export class OrganizerStore extends DurableObject<Env> {
       status: acc.status,
       email: acc.email,
       tasks: { granted, enabled: acc.tasks_enabled === 1, problem: acc.tasks_problem },
+      events: { granted: this.eventsGranted(acc) },
     }
     if (acc.status !== 'ok') return base
     // halb eingerichtete Aufgaben-Liste nachholen
@@ -1202,6 +1292,7 @@ export class OrganizerStore extends DurableObject<Env> {
           color: c.backgroundColor ?? '#5f6b7a',
           primary: !!c.primary,
           selected: selected ? selected.includes(c.id) : !!c.selected || !!c.primary,
+          writable: c.accessRole === 'owner' || c.accessRole === 'writer',
         }))
         .sort((a, b) => Number(b.primary) - Number(a.primary) || a.name.localeCompare(b.name))
       return { ...base, calendars: cals }
@@ -1325,8 +1416,193 @@ export class OrganizerStore extends DurableObject<Env> {
   private async googleEvents(url: URL): Promise<{ events: CalendarEventOut[] }> {
     const from = url.searchParams.get('from')
     const to = url.searchParams.get('to')
-    if (!isDate(from) || !isDate(to) || daysBetween(from, to) < 0 || daysBetween(from, to) > 62) throw new HttpError(400, 'Ungültiger Zeitraum')
+    if (!isDate(from) || !isDate(to) || daysBetween(from, to) < 0 || daysBetween(from, to) > 400) throw new HttpError(400, 'Ungültiger Zeitraum')
     return { events: await this.fetchEvents(from, to) }
+  }
+
+  private eventsGranted(acc: GoogleAccountRow | null): boolean {
+    return !!acc?.scopes?.split(/\s+/).includes(EVENTS_SCOPE)
+  }
+
+  /** Google-Termin → Format der App */
+  private eventOut(c: GCalendarListEntry, e: GEvent): CalendarEventOut | null {
+    if (e.status === 'cancelled' || !e.start || !e.end) return null
+    const allDay = !!e.start.date
+    const meet = e.hangoutLink ?? e.conferenceData?.entryPoints?.find((p) => p.entryPointType === 'video')?.uri ?? null
+    return {
+      id: e.id,
+      calendarId: c.id,
+      calendarName: c.summaryOverride ?? c.summary,
+      title: e.summary?.trim() || '(ohne Titel)',
+      start: allDay ? e.start.date! : e.start.dateTime!,
+      end: allDay ? e.end.date! : e.end.dateTime!,
+      allDay,
+      color: (e.colorId && EVENT_COLORS[e.colorId]) || c.backgroundColor || '#5f6b7a',
+      location: e.location ?? null,
+      link: e.htmlLink ?? null,
+      description: e.description ? e.description.slice(0, 4000) : null,
+      writable: (c.accessRole === 'owner' || c.accessRole === 'writer') && this.eventsGranted(this.account()),
+      colorId: e.colorId ?? null,
+      recurringId: e.recurringEventId ?? null,
+      meet,
+      guests: (e.attendees ?? []).filter((a) => !a.self).length,
+    }
+  }
+
+  /** Suche in den sichtbaren Kalendern (ein Jahr zurück, ein Jahr voraus) */
+  private async searchEvents(q: string): Promise<{ events: CalendarEventOut[] }> {
+    const acc = this.account()
+    if (!acc || !this.cfg() || acc.status !== 'ok') return { events: [] }
+    const selected: string[] | null = acc.selected_calendars ? JSON.parse(acc.selected_calendars) : null
+    const cals = (await this.calendars()).filter((c) => c.id !== acc.organizer_calendar_id && (selected ? selected.includes(c.id) : c.selected || c.primary))
+    const now = Date.now()
+    const lists = await Promise.all(
+      cals.map((c) =>
+        this.g<GEventList>('GET', `/calendars/${encodeURIComponent(c.id)}/events`, {
+          query: { q, timeMin: new Date(now - 365 * DAY).toISOString(), timeMax: new Date(now + 365 * DAY).toISOString(), singleEvents: 'true', orderBy: 'startTime', maxResults: '50' },
+        })
+          .then((r) => ({ c, items: r.items ?? [] }))
+          .catch(() => ({ c, items: [] as GEvent[] })),
+      ),
+    )
+    const out: CalendarEventOut[] = []
+    for (const { c, items } of lists) for (const e of items) {
+      const ev = this.eventOut(c, e)
+      if (ev) out.push(ev)
+    }
+    out.sort((a, b) => a.start.localeCompare(b.start))
+    return { events: out.slice(0, 100) }
+  }
+
+  private async writableCalendar(id: unknown): Promise<GCalendarListEntry> {
+    if (!this.eventsGranted(this.account())) throw new HttpError(403, 'Für Termine bitte Google einmal neu verbinden (Berechtigung „Termine bearbeiten“).')
+    if (typeof id !== 'string' || id.length > 300) throw new HttpError(400, 'Ungültiger Kalender')
+    const c = (await this.calendars()).find((x) => x.id === id)
+    if (!c) throw new HttpError(404, 'Kalender nicht gefunden')
+    if (c.accessRole !== 'owner' && c.accessRole !== 'writer') throw new HttpError(403, 'In diesem Kalender darfst du nichts ändern')
+    return c
+  }
+
+  /** Eingaben für einen Termin prüfen und in Googles Format bringen */
+  private eventBody(b: Record<string, unknown>, partial: boolean): Record<string, unknown> {
+    const out: Record<string, unknown> = {}
+    if ('title' in b) {
+      const t = typeof b.title === 'string' ? b.title.trim().slice(0, 500) : ''
+      if (!t) throw new HttpError(400, 'Titel fehlt')
+      out.summary = t
+    } else if (!partial) throw new HttpError(400, 'Titel fehlt')
+    if ('location' in b) out.location = typeof b.location === 'string' ? b.location.slice(0, 500) : null
+    if ('description' in b) out.description = typeof b.description === 'string' ? b.description.slice(0, 8000) : null
+    if ('colorId' in b) {
+      if (b.colorId !== null && !(typeof b.colorId === 'string' && EVENT_COLORS[b.colorId])) throw new HttpError(400, 'Ungültige Farbe')
+      out.colorId = b.colorId
+    }
+    if ('start' in b || 'end' in b || !partial) {
+      const allDay = b.allDay === true
+      const tz = typeof b.timeZone === 'string' && b.timeZone.length < 60 ? b.timeZone : 'Europe/Berlin'
+      if (allDay) {
+        if (!isDate(b.start) || !isDate(b.end) || (b.end as string) <= (b.start as string)) throw new HttpError(400, 'Ungültige Tage')
+        out.start = { date: b.start, dateTime: null }
+        out.end = { date: b.end, dateTime: null }
+      } else {
+        const s = typeof b.start === 'string' ? Date.parse(b.start) : NaN
+        const e = typeof b.end === 'string' ? Date.parse(b.end) : NaN
+        if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s || e - s > 31 * DAY) throw new HttpError(400, 'Ungültige Zeit')
+        out.start = { dateTime: new Date(s).toISOString(), timeZone: tz, date: null }
+        out.end = { dateTime: new Date(e).toISOString(), timeZone: tz, date: null }
+      }
+    }
+    if ('recurrence' in b) {
+      const r = b.recurrence
+      if (r !== null && !(typeof r === 'string' && /^RRULE:[A-Z0-9=;,+-]{3,200}$/i.test(r))) throw new HttpError(400, 'Ungültige Wiederholung')
+      out.recurrence = r ? [r.toUpperCase()] : []
+    }
+    if ('reminders' in b) {
+      const m = b.reminders
+      if (m === null) out.reminders = { useDefault: true }
+      else if (Array.isArray(m) && m.length <= 5 && m.every((x) => Number.isInteger(x) && x >= 0 && x <= 40320)) out.reminders = { useDefault: false, overrides: (m as number[]).map((x) => ({ method: 'popup', minutes: x })) }
+      else throw new HttpError(400, 'Ungültige Erinnerung')
+    }
+    return out
+  }
+
+  private async createEvent(body: unknown): Promise<CalendarEventOut> {
+    const b = (body ?? {}) as Record<string, unknown>
+    const c = await this.writableCalendar(b.calendarId)
+    const ev = await this.g<GEvent>('POST', `/calendars/${encodeURIComponent(c.id)}/events`, { body: this.eventBody(b, false) })
+    this.eventCache.clear()
+    return this.eventOut(c, ev)!
+  }
+
+  /** Termin ändern; mit `all` bei Serien den ganzen Ursprungstermin, mit `toCalendar` in einen anderen Kalender verschieben */
+  private async updateEvent(body: unknown): Promise<CalendarEventOut | { ok: true }> {
+    const b = (body ?? {}) as Record<string, unknown>
+    const c = await this.writableCalendar(b.calendarId)
+    if (typeof b.id !== 'string' || b.id.length > 1100) throw new HttpError(400, 'Ungültiger Termin')
+    let id = b.id
+    if (b.all === true && typeof b.recurringId === 'string') id = b.recurringId
+    const patch = this.eventBody((b.patch ?? {}) as Record<string, unknown>, true)
+    let ev: GEvent | null = null
+    if (Object.keys(patch).length) {
+      // ganze Serie verschieben: nur die Uhrzeit übernehmen, das Datum des Ursprungs behalten
+      if (b.all === true && id !== b.id && (patch.start || patch.end)) {
+        const orig = await this.g<GEvent>('GET', `/calendars/${encodeURIComponent(c.id)}/events/${encodeURIComponent(id)}`)
+        const shift = (t: { dateTime?: string | null; date?: string | null; timeZone?: string }, o?: GEventTime) => {
+          if (!t.dateTime || !o?.dateTime) return t
+          const n = new Date(t.dateTime)
+          const od = new Date(o.dateTime)
+          od.setUTCHours(n.getUTCHours(), n.getUTCMinutes(), 0, 0)
+          return { ...t, dateTime: od.toISOString() }
+        }
+        if (patch.start) patch.start = shift(patch.start as never, orig.start)
+        if (patch.end) patch.end = shift(patch.end as never, orig.end)
+      }
+      ev = await this.g<GEvent>('PATCH', `/calendars/${encodeURIComponent(c.id)}/events/${encodeURIComponent(id)}`, { body: patch })
+    }
+    let cal = c
+    if (typeof b.toCalendar === 'string' && b.toCalendar !== c.id) {
+      cal = await this.writableCalendar(b.toCalendar)
+      ev = await this.g<GEvent>('POST', `/calendars/${encodeURIComponent(c.id)}/events/${encodeURIComponent(id)}/move`, { query: { destination: cal.id } })
+    }
+    this.eventCache.clear()
+    return ev ? (this.eventOut(cal, ev) ?? { ok: true }) : { ok: true }
+  }
+
+  private async deleteEvent(body: unknown): Promise<{ ok: true }> {
+    const b = (body ?? {}) as Record<string, unknown>
+    const c = await this.writableCalendar(b.calendarId)
+    if (typeof b.id !== 'string' || b.id.length > 1100) throw new HttpError(400, 'Ungültiger Termin')
+    const id = b.all === true && typeof b.recurringId === 'string' ? b.recurringId : b.id
+    try {
+      await this.g('DELETE', `/calendars/${encodeURIComponent(c.id)}/events/${encodeURIComponent(id)}`)
+    } catch (e) {
+      if (!(e instanceof GoogleApiError && (e.status === 404 || e.status === 410))) throw e
+    }
+    this.eventCache.clear()
+    return { ok: true }
+  }
+
+  /** Termine der nächsten Stunden merken – für Erinnerungen per Push */
+  private async refreshUpcoming() {
+    const acc = this.account()
+    if (!acc || acc.status !== 'ok' || !this.pushTz() || this.pushSettings().events === false) return
+    const tz = this.pushTz()!
+    const now = Date.now()
+    const today = utcToZoned(now, tz).date
+    const tomorrow = utcToZoned(now + DAY, tz).date
+    const evs = await this.fetchEvents(today, tomorrow)
+    const soon = evs
+      .filter((e) => !e.allDay && Date.parse(e.start) > now - 5 * MIN && Date.parse(e.start) < now + 26 * 60 * MIN)
+      .map((e) => ({ id: e.id, cal: e.calendarId, title: e.title, start: e.start, end: e.end, location: e.location }))
+    this.kvSet('upcoming_events', JSON.stringify(soon.slice(0, 100)))
+  }
+
+  private upcomingEvents(): { id: string; cal: string; title: string; start: string; end: string; location: string | null }[] {
+    try {
+      return JSON.parse(this.kvGet('upcoming_events') ?? '[]')
+    } catch {
+      return []
+    }
   }
 
   private async fetchEvents(from: string, to: string): Promise<CalendarEventOut[]> {
@@ -1341,12 +1617,23 @@ export class OrganizerStore extends DurableObject<Env> {
     // großzügig einen Tag davor/danach holen, die App filtert nach Ortszeit
     const timeMin = new Date(Date.parse(from) - DAY).toISOString()
     const timeMax = new Date(Date.parse(to) + 2 * DAY).toISOString()
+    const fetchAll = async (c: GCalendarListEntry) => {
+      const items: GEvent[] = []
+      let pageToken: string | undefined
+      let guard = 0
+      do {
+        const r = await this.g<GEventList>('GET', `/calendars/${encodeURIComponent(c.id)}/events`, {
+          query: { timeMin, timeMax, singleEvents: 'true', orderBy: 'startTime', maxResults: '2500', pageToken },
+        })
+        items.push(...(r.items ?? []))
+        pageToken = r.nextPageToken
+      } while (pageToken && ++guard < 5)
+      return items
+    }
     const lists = await Promise.all(
       cals.map((c) =>
-        this.g<GEventList>('GET', `/calendars/${encodeURIComponent(c.id)}/events`, {
-          query: { timeMin, timeMax, singleEvents: 'true', orderBy: 'startTime', maxResults: '250' },
-        })
-          .then((r) => ({ c, items: r.items ?? [] }))
+        fetchAll(c)
+          .then((items) => ({ c, items }))
           .catch((e) => {
             console.warn('events', c.id, e)
             return { c, items: [] as GEvent[] }
@@ -1356,20 +1643,8 @@ export class OrganizerStore extends DurableObject<Env> {
     const events: CalendarEventOut[] = []
     for (const { c, items } of lists) {
       for (const e of items) {
-        if (e.status === 'cancelled' || !e.start || !e.end) continue
-        const allDay = !!e.start.date
-        events.push({
-          id: e.id,
-          calendarId: c.id,
-          calendarName: c.summaryOverride ?? c.summary,
-          title: e.summary?.trim() || '(ohne Titel)',
-          start: allDay ? e.start.date! : e.start.dateTime!,
-          end: allDay ? e.end.date! : e.end.dateTime!,
-          allDay,
-          color: (e.colorId && EVENT_COLORS[e.colorId]) || c.backgroundColor || '#5f6b7a',
-          location: e.location ?? null,
-          link: e.htmlLink ?? null,
-        })
+        const ev = this.eventOut(c, e)
+        if (ev) events.push(ev)
       }
     }
     this.eventCache.set(key, { at: Date.now(), data: events })
@@ -1395,6 +1670,19 @@ export class OrganizerStore extends DurableObject<Env> {
     return this.pushing
   }
 
+  /** Titel für Google: Teile bekommen „(Teil 1/3)“ angehängt */
+  private displayTitle(t: TaskRow): string {
+    if (t.part_index === null || !t.parent_id) return t.title
+    const r = this.sql
+      .exec<{ n: number; i: number }>(
+        `SELECT COUNT(*) AS n, SUM(CASE WHEN part_index <= ? THEN 1 ELSE 0 END) AS i FROM tasks WHERE parent_id = ? AND part_index IS NOT NULL AND deleted_at IS NULL`,
+        t.part_index,
+        t.parent_id,
+      )
+      .one()
+    return r.n > 1 ? `${t.title} (Teil ${r.i}/${r.n})` : t.title
+  }
+
   private async doPush() {
     await this.pushCalendar()
     await this.pushTasks()
@@ -1415,7 +1703,7 @@ export class OrganizerStore extends DurableObject<Env> {
           let etag = t.gcal_etag
           if (want) {
             const body = {
-              summary: (t.status === 'done' ? '✓ ' : '') + t.title,
+              summary: (t.status === 'done' ? '✓ ' : '') + this.displayTitle(t),
               description: [t.notes, 'Aus deinem Organizer'].filter(Boolean).join('\n\n'),
               start: { dateTime: t.start_at, timeZone: t.timezone ?? 'UTC' },
               end: { dateTime: t.end_at, timeZone: t.timezone ?? 'UTC' },
@@ -1495,6 +1783,12 @@ export class OrganizerStore extends DurableObject<Env> {
         console.warn('tasks pull', e)
       }
     }
+    try {
+      await this.refreshUpcoming()
+      this.planReminders()
+    } catch (e) {
+      console.warn('upcoming', e)
+    }
     if (this.metaGet('gpull_at') === null) {
       this.metaSet('gpull_at', Date.now() + PULL_EVERY)
       await this.scheduleAlarm()
@@ -1545,9 +1839,9 @@ export class OrganizerStore extends DurableObject<Env> {
           const tz = ev.start.timeZone ?? 'UTC'
           const timed = !!ev.start.dateTime
           this.sql.exec(
-            `INSERT INTO tasks (id, title, notes, status, priority, horizon, tags, due_date, start_at, end_at, timezone, sort,
+            `INSERT INTO tasks (id, title, notes, status, prio, horizon, tags, due_date, start_at, end_at, timezone, sort,
                created_at, updated_at, seq, gcal_event_id, gcal_etag, gcal_dirty, origin_event_id, num)
-             VALUES (?, ?, ?, 'open', 4, 'backlog', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+             VALUES (?, ?, ?, 'open', 0, 'backlog', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
             id,
             (ev.summary ?? '').trim() || '(ohne Titel)',
             ev.description ?? null,
@@ -1722,7 +2016,7 @@ export class OrganizerStore extends DurableObject<Env> {
           let updated = t.gtask_updated
           if (want) {
             const body: Record<string, unknown> = {
-              title: t.title.slice(0, 1024),
+              title: this.displayTitle(t).slice(0, 1024),
               notes: (t.notes ?? '').slice(0, 8000),
               due: t.due_date ? `${t.due_date}T00:00:00.000Z` : null,
               status: t.status === 'done' ? 'completed' : 'needsAction',
@@ -1808,8 +2102,8 @@ export class OrganizerStore extends DurableObject<Env> {
           const title = (it.title ?? '').trim()
           if (it.deleted || it.status === 'completed' || !title) continue
           this.sql.exec(
-            `INSERT INTO tasks (id, title, notes, status, priority, horizon, tags, blocked_by, due_date, sort, num, created_at, updated_at, seq, gtask_id, gtask_updated, gtask_dirty)
-             VALUES (?, ?, ?, 'open', 4, 'backlog', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+            `INSERT INTO tasks (id, title, notes, status, prio, horizon, tags, blocked_by, due_date, sort, num, created_at, updated_at, seq, gtask_id, gtask_updated, gtask_dirty)
+             VALUES (?, ?, ?, 'open', 0, 'backlog', '[]', '[]', ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
             crypto.randomUUID(),
             title.slice(0, 500),
             it.notes || null,
@@ -1914,6 +2208,7 @@ type TaskFields = {
   blocked_by: string[]
   estimate: number | null
   day_order: number | null
+  part_index: number | null
 }
 
 const DEFAULT_TASK = (): Omit<TaskFields, 'title'> => ({
@@ -1921,7 +2216,7 @@ const DEFAULT_TASK = (): Omit<TaskFields, 'title'> => ({
   parent_id: null,
   notes: null,
   status: 'open',
-  priority: 4,
+  priority: 0,
   horizon: 'backlog',
   tags: [],
   due_date: null,
@@ -1936,7 +2231,26 @@ const DEFAULT_TASK = (): Omit<TaskFields, 'title'> => ({
   blocked_by: [],
   estimate: null,
   day_order: null,
+  part_index: null,
 })
+
+/** Anfrage einer alten App-Version: Wichtigkeit (auch in Vorlagen) auf die neue Skala heben */
+function legacyBody(b: unknown): unknown {
+  if (!b || typeof b !== 'object') return b
+  const o = { ...(b as Record<string, unknown>) }
+  if ('priority' in o) o.priority = upgradePrio(o.priority)
+  if (o.payload && typeof o.payload === 'object') {
+    const walk = (n: unknown): unknown => {
+      if (!n || typeof n !== 'object') return n
+      const c = { ...(n as Record<string, unknown>) }
+      if ('priority' in c) c.priority = upgradePrio(c.priority)
+      if (Array.isArray(c.subtasks)) c.subtasks = c.subtasks.map(walk)
+      return c
+    }
+    o.payload = walk(o.payload)
+  }
+  return o
+}
 
 // ---------------------------------------------------------------------------
 type TemplateRow = { id: string; name: string; payload: string; created_at: string; updated_at: string; deleted_at: string | null; seq: number }
@@ -1973,7 +2287,7 @@ function cleanTemplatePayload(v: unknown): TemplateNode {
     if (!title) throw new HttpError(400, 'Vorlage ohne Titel')
     const out: TemplateNode = { title }
     if (typeof o.notes === 'string' && o.notes.length <= 20000) out.notes = o.notes
-    if (Number.isInteger(o.priority) && (o.priority as number) >= 1 && (o.priority as number) <= 4) out.priority = o.priority as number
+    if (Number.isInteger(o.priority) && (o.priority as number) >= 0 && (o.priority as number) <= 5) out.priority = o.priority as number
     if (Array.isArray(o.tags)) out.tags = o.tags.filter((t): t is string => typeof t === 'string' && t.length <= 40).slice(0, 30)
     if (typeof o.rrule === 'string' && o.rrule.length <= 200) out.rrule = o.rrule
     if (Array.isArray(o.subtasks) && depth < 3) out.subtasks = o.subtasks.map((c) => walk(c, depth + 1))

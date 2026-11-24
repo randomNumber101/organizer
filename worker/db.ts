@@ -42,6 +42,9 @@ export type TaskRow = {
   gtask_updated: string | null
   gtask_dirty: number
   day_order: number | null
+  /** Wichtigkeit 0–5 (die alte Spalte priority ist seit Migration 7 unbenutzt) */
+  prio: number
+  part_index: number | null
   created_at: string
   updated_at: string
   deleted_at: string | null
@@ -70,8 +73,8 @@ const parseArr = (v: string | null | undefined): string[] => {
 }
 
 export function taskOut(r: TaskRow) {
-  const { deleted_at: _d, seq: _s, gcal_dirty: _g, gtask_dirty: _gd, gtask_updated: _gu, tags, blocked_by, ...rest } = r
-  return { ...rest, tags: parseArr(tags), blocked_by: parseArr(blocked_by) }
+  const { deleted_at: _d, seq: _s, gcal_dirty: _g, gtask_dirty: _gd, gtask_updated: _gu, tags, blocked_by, prio, priority: _p, ...rest } = r
+  return { ...rest, priority: prio ?? 0, tags: parseArr(tags), blocked_by: parseArr(blocked_by) }
 }
 
 export function listOut(r: ListRow) {
@@ -132,6 +135,7 @@ export type TaskInput = Partial<{
   blocked_by: string[]
   estimate: number | null
   day_order: number | null
+  part_index: number | null
 }>
 
 const bad = (msg: string): never => {
@@ -152,7 +156,7 @@ export function cleanTaskInput(body: unknown): TaskInput {
   if ('list_id' in b) out.list_id = b.list_id === null ? null : isUuid(b.list_id) ? b.list_id : bad('Ungültige Liste')
   if ('parent_id' in b) out.parent_id = b.parent_id === null ? null : isUuid(b.parent_id) ? b.parent_id : bad('Ungültige Elternaufgabe')
   if ('status' in b) out.status = b.status === 'open' || b.status === 'done' ? b.status : bad('Ungültiger Status')
-  if ('priority' in b) out.priority = Number.isInteger(b.priority) && (b.priority as number) >= 1 && (b.priority as number) <= 4 ? (b.priority as number) : bad('Ungültige Priorität')
+  if ('priority' in b) out.priority = Number.isInteger(b.priority) && (b.priority as number) >= 0 && (b.priority as number) <= 5 ? (b.priority as number) : bad('Ungültige Priorität')
   if ('horizon' in b) out.horizon = b.horizon === 'backlog' || b.horizon === 'short' || b.horizon === 'long' ? b.horizon : bad('Ungültiger Zeithorizont')
   if ('tags' in b) {
     const tags = Array.isArray(b.tags) ? b.tags : bad('Tags ungültig')
@@ -173,6 +177,7 @@ export function cleanTaskInput(body: unknown): TaskInput {
   if ('origin_event_id' in b) out.origin_event_id = b.origin_event_id === null ? null : typeof b.origin_event_id === 'string' && b.origin_event_id.length <= 1100 ? b.origin_event_id : bad('Ungültiger Termin-Verweis')
   if ('sort' in b) out.sort = typeof b.sort === 'number' && Number.isFinite(b.sort) ? b.sort : bad('Ungültige Sortierung')
   if ('day_order' in b) out.day_order = b.day_order === null ? null : typeof b.day_order === 'number' && Number.isFinite(b.day_order) ? b.day_order : bad('Ungültige Reihenfolge')
+  if ('part_index' in b) out.part_index = b.part_index === null ? null : Number.isInteger(b.part_index) && (b.part_index as number) >= 1 && (b.part_index as number) <= 99 ? (b.part_index as number) : bad('Ungültiger Teil')
   return out
 }
 

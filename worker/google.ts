@@ -27,7 +27,9 @@ export interface GoogleConfig {
 export const TASKS_SCOPE = 'https://www.googleapis.com/auth/tasks'
 
 /** Alle Kalender lesen, einen eigenen Kalender „Organizer“ anlegen und darin schreiben, Google Aufgaben. */
-export const SCOPES = ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/calendar.app.created', TASKS_SCOPE]
+/** Termine in allen Kalendern anlegen/ändern (Kalender-App-Ersatz) */
+export const EVENTS_SCOPE = 'https://www.googleapis.com/auth/calendar.events'
+export const SCOPES = ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/calendar.app.created', TASKS_SCOPE, EVENTS_SCOPE]
 
 export const ORGANIZER_CALENDAR_NAME = 'Organizer'
 export const ORGANIZER_CALENDAR_MARK = 'organizer-app'
@@ -167,6 +169,12 @@ export interface GEvent {
   start?: GEventTime
   end?: GEventTime
   extendedProperties?: { private?: Record<string, string> }
+  recurringEventId?: string
+  recurrence?: string[]
+  hangoutLink?: string
+  conferenceData?: { entryPoints?: { entryPointType?: string; uri?: string }[] }
+  attendees?: { email?: string; displayName?: string; self?: boolean; responseStatus?: string }[]
+  transparency?: 'opaque' | 'transparent'
 }
 
 export interface GEventList {

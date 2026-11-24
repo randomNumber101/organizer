@@ -6,7 +6,7 @@ const ROWS: { kind: TokenKind; label: string; ex: string[] }[] = [
   { kind: 'deadline', label: 'Frist', ex: ['bis Freitag', 'bis morgen früh', 'bis 12.12. 18 Uhr', 'bis Ende der Woche', 'Frist Monatsende'] },
   { kind: 'duration', label: 'Dauer', ex: ['30 min', '2h', '1h30', 'für eine halbe Stunde'] },
   { kind: 'repeat', label: 'Wiederholen', ex: ['täglich', 'werktags', 'jeden Montag', 'montags und donnerstags', 'alle 2 Wochen', 'jeden 1.'] },
-  { kind: 'prio', label: 'Wichtigkeit', ex: ['dringend', 'wichtig', 'prio 2', 'unwichtig', '!1 … !3'] },
+  { kind: 'prio', label: 'Wichtigkeit', ex: ['dringend (5)', 'wichtig (4)', 'prio 3', 'unwichtig (1)', '!0 … !5', '!!! / !!'] },
   { kind: 'horizon', label: 'Horizont', ex: ['kurzfristig', 'langfristig', 'irgendwann'] },
   { kind: 'wait', label: 'Wartet auf', ex: ['warte auf 4', 'warte auf Folien', 'warte auf 4 und 7'] },
   { kind: 'parent', label: 'Unteraufgabe', ex: ['unter 7', 'unter Präsentation', '^7'] },

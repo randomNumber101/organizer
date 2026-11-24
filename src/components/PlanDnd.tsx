@@ -15,8 +15,14 @@ import {
   type DragMoveEvent,
   type DragStartEvent,
 } from '@dnd-kit/core'
+import { Scissors } from 'lucide-react'
 import { useStore } from '../store'
-import { hhmm, minutesBetween } from '../lib/dates'
+import type { CalendarEvent } from '../lib/types'
+import { addDaysStr, deviceTimeZone, hhmm, isoFromDayMinutes, localDayOf, minutesBetween } from '../lib/dates'
+import { useSplitKey } from './DayList'
+import { differenceInCalendarDays, parseISO } from 'date-fns'
+
+const daysBetweenStr = (a: string, b: string) => differenceInCalendarDays(parseISO(b), parseISO(a))
 import { haptic } from '../lib/haptics'
 import { eventY, markDragEnd } from '../lib/drag'
 import { TaskCard } from './TaskCard'
@@ -25,15 +31,19 @@ import { TaskCard } from './TaskCard'
  * Gemeinsames Ziehen für Planer und Kalender:
  * Karten aus Listen ins Zeitraster ziehen, Blöcke im Raster verschieben, zurück in „Zu planen“ legen.
  */
-export type PlanPreview = { kind: 'slot'; day: string; start: number; dur: number } | { kind: 'allday'; day: string } | { kind: 'unplan' } | null
+export type PlanPreview = { kind: 'slot'; day: string; start: number; dur: number } | { kind: 'allday'; day: string } | { kind: 'mday'; day: string } | { kind: 'unplan' } | null
+
+type DragData = { type: 'task' | 'block'; taskId: string } | { type: 'event'; event: CalendarEvent; taskId?: undefined }
 
 interface Ctx {
   preview: PlanPreview
   activeId: string | null
   hourPx: number
+  /** Strg gedrückt: Teil abspalten statt verschieben */
+  splitting: boolean
 }
 
-const PlanContext = createContext<Ctx>({ preview: null, activeId: null, hourPx: 52 })
+const PlanContext = createContext<Ctx>({ preview: null, activeId: null, hourPx: 52, splitting: false })
 export const usePlan = () => useContext(PlanContext)
 
 const SNAP = 15
@@ -48,9 +58,15 @@ export function PlanDnd({ children, hourPx }: { children: ReactNode; hourPx: num
   const tasks = useStore((s) => s.tasks)
   const schedule = useStore((s) => s.schedule)
   const updateTask = useStore((s) => s.updateTask)
+  const moveToDay = useStore((s) => s.moveToDay)
+  const updateEvent = useStore((s) => s.updateEvent)
+  const splitOff = useStore((s) => s.splitOff)
   const setDragging = useStore((s) => s.setDragging)
   const [preview, setPreview] = useState<PlanPreview>(null)
-  const [active, setActive] = useState<{ id: string; type: 'task' | 'block'; width: number } | null>(null)
+  const [active, setActive] = useState<{ id: string; type: 'task' | 'block' | 'event'; width: number; event?: CalendarEvent } | null>(null)
+  const [splitting, setSplitting] = useSplitKey(!!active && active.type !== 'event')
+  const splitRef = useRef(false)
+  splitRef.current = splitting
   const startY = useRef(0)
   const grabOffset = useRef(0)
   const pointerY = useRef(0)
@@ -99,26 +115,31 @@ export function PlanDnd({ children, hourPx }: { children: ReactNode; hourPx: num
     return () => cancelAnimationFrame(scrollRaf.current)
   }, [active])
 
-  const durationOf = (taskId: string) => {
-    const t = tasks[taskId]
-    return t?.start_at && t.end_at ? Math.max(SNAP, minutesBetween(t.start_at, t.end_at)) : Math.max(SNAP, t?.estimate ?? 60)
+  const durationOf = (data: DragData) => {
+    if (data.type === 'event') return data.event.allDay ? 60 : Math.max(SNAP, minutesBetween(data.event.start, data.event.end))
+    const t = tasks[data.taskId]
+    const full = t?.start_at && t.end_at ? Math.max(SNAP, minutesBetween(t.start_at, t.end_at)) : Math.max(SNAP, t?.estimate ?? 60)
+    return splitRef.current ? Math.max(SNAP, snap(full / 2)) : full
   }
 
   const onDragStart = (e: DragStartEvent) => {
-    const data = e.active.data.current as { type: 'task' | 'block'; taskId: string } | undefined
+    const data = e.active.data.current as DragData | undefined
     if (!data) return
     haptic(12)
     setDragging(true)
     startY.current = eventY(e.activatorEvent) ?? 0
     pointerY.current = startY.current
     const rect = e.active.rect.current.initial
-    const el = data.type === 'block' ? document.querySelector<HTMLElement>(`[data-block="${data.taskId}"]`) : null
+    const blockKey = data.type === 'event' ? `ev:${data.event.calendarId}:${data.event.id}` : data.taskId
+    const el = data.type !== 'task' ? document.querySelector<HTMLElement>(`[data-block="${CSS.escape(blockKey)}"]`) : null
     grabOffset.current = el ? startY.current - el.getBoundingClientRect().top : rect ? startY.current - rect.top : 0
-    setActive({ id: data.taskId, type: data.type, width: rect?.width ?? 200 })
+    const ev = e.activatorEvent as MouseEvent | null
+    setSplitting(data.type !== 'event' && !!ev && (ev.ctrlKey || ev.metaKey || ev.altKey))
+    setActive({ id: data.type === 'event' ? blockKey : data.taskId, type: data.type, width: rect?.width ?? 200, event: data.type === 'event' ? data.event : undefined })
   }
 
   const onDragMove = (e: DragMoveEvent) => {
-    const data = e.active.data.current as { type: 'task' | 'block'; taskId: string } | undefined
+    const data = e.active.data.current as DragData | undefined
     if (!data) return
     const y = pointerY.current
     const over = e.over ? String(e.over.id) : ''
@@ -128,12 +149,13 @@ export function PlanDnd({ children, hourPx }: { children: ReactNode; hourPx: num
       if (!col) return
       const r = col.getBoundingClientRect()
       const pxPerMin = hourPx / 60
-      const top = data.type === 'block' ? y - grabOffset.current : y - 10
-      const dur = durationOf(data.taskId)
+      const top = data.type !== 'task' ? y - grabOffset.current : y - 10
+      const dur = durationOf(data)
       const start = Math.max(0, Math.min(24 * 60 - dur, snap((top - r.top) / pxPerMin)))
       setPv({ kind: 'slot', day, start, dur })
     } else if (over.startsWith('allday:')) setPv({ kind: 'allday', day: over.slice(7) })
-    else if (over.startsWith('unplan')) setPv({ kind: 'unplan' })
+    else if (over.startsWith('mday:')) setPv({ kind: 'mday', day: over.slice(5) })
+    else if (over.startsWith('unplan') && data.type !== 'event') setPv({ kind: 'unplan' })
     else setPv(null)
   }
 
@@ -145,12 +167,26 @@ export function PlanDnd({ children, hourPx }: { children: ReactNode; hourPx: num
   }
 
   const onDragEnd = (e: DragEndEvent) => {
-    const data = e.active.data.current as { type: 'task' | 'block'; taskId: string } | undefined
+    const data = e.active.data.current as DragData | undefined
     const p = previewRef.current
     const over = e.over ? String(e.over.id) : ''
+    if (data?.type === 'event') {
+      moveEvent(data.event, p)
+      return finish()
+    }
+    if (data && splitRef.current && tasks[data.taskId]) {
+      // Strg: einen Teil abspalten und dort ablegen
+      const id = data.taskId
+      if (p?.kind === 'slot') splitOff(id, { due_date: p.day, start_at: isoFromDayMinutes(p.day, p.start), end_at: isoFromDayMinutes(p.day, p.start + p.dur), timezone: deviceTimeZone() })
+      else if (p?.kind === 'allday' || p?.kind === 'mday') splitOff(id, { due_date: p.day })
+      return finish()
+    }
     if (data) {
       const t = tasks[data.taskId]
-      if (t && p?.kind === 'slot') {
+      if (t && p?.kind === 'mday') {
+        moveToDay(t.id, p.day)
+        haptic(8)
+      } else if (t && p?.kind === 'slot') {
         void schedule(t.id, p.day, p.start, p.dur)
         haptic(8)
       } else if (t && p?.kind === 'allday') {
@@ -164,21 +200,63 @@ export function PlanDnd({ children, hourPx }: { children: ReactNode; hourPx: num
     finish()
   }
 
-  const activeTask = active ? tasks[active.id] : null
+  /** Termin verschieben: ins Raster (Uhrzeit), in die Ganztags-Zeile oder auf einen Tag im Monat */
+  const moveEvent = (ev: CalendarEvent, p: PlanPreview) => {
+    if (!p || p.kind === 'unplan') return
+    if (p.kind === 'slot') {
+      const start = isoFromDayMinutes(p.day, p.start)
+      const end = isoFromDayMinutes(p.day, p.start + p.dur)
+      if (!ev.allDay && start === new Date(ev.start).toISOString() && end === new Date(ev.end).toISOString()) return
+      void updateEvent(ev, { start, end, allDay: false })
+    } else {
+      const from = ev.allDay ? ev.start : localDayOf(ev.start)
+      const delta = daysBetweenStr(from, p.day)
+      if (p.kind === 'allday' && !ev.allDay) {
+        void updateEvent(ev, { start: p.day, end: addDaysStr(p.day, 1), allDay: true })
+      } else {
+        if (!delta) return
+        const shift = (v: string) => (ev.allDay ? addDaysStr(v, delta) : new Date(Date.parse(v) + delta * 86_400_000).toISOString())
+        void updateEvent(ev, { start: shift(ev.start), end: shift(ev.end), allDay: ev.allDay })
+      }
+    }
+    haptic(8)
+  }
+
+  const activeTask = active && active.type !== 'event' ? tasks[active.id] : null
 
   return (
-    <PlanContext.Provider value={{ preview, activeId: active?.id ?? null, hourPx }}>
+    <PlanContext.Provider value={{ preview, activeId: active?.id ?? null, hourPx, splitting }}>
       <DndContext sensors={sensors} collisionDetection={collision} autoScroll={false} onDragStart={onDragStart} onDragMove={onDragMove} onDragEnd={onDragEnd} onDragCancel={finish}>
         {children}
         {createPortal(
           <DragOverlay dropAnimation={null}>
             {activeTask && active?.type === 'task' && (
-              <div style={{ width: Math.min(active.width, 300), transform: 'rotate(1.5deg)' }}>
+              <div className="card-overlay-wrap" style={{ width: Math.min(active.width, 300), transform: 'rotate(1.5deg)' }}>
                 <TaskCard task={activeTask} overlay showList={false} />
+                {splitting && (
+                  <span className="split-flag">
+                    <Scissors size={12} /> Teil abspalten
+                  </span>
+                )}
+              </div>
+            )}
+            {active?.type === 'event' && active.event && (
+              <div className="tl-overlay event" style={{ width: Math.min(active.width, 260), ['--ev' as string]: active.event.color }}>
+                {active.event.title}
+                {preview?.kind === 'slot' && (
+                  <div className="t-time" style={{ fontWeight: 500, fontSize: 11, opacity: 0.75 }}>
+                    {hhmm(preview.start)}–{hhmm(preview.start + preview.dur)}
+                  </div>
+                )}
               </div>
             )}
             {activeTask && active?.type === 'block' && (
-              <div className="tl-overlay" style={{ width: active.width }}>
+              <div className={`tl-overlay ${splitting ? 'splitting' : ''}`} style={{ width: active.width }}>
+                {splitting && (
+                  <span className="split-flag">
+                    <Scissors size={12} /> Teil abspalten
+                  </span>
+                )}
                 {activeTask.title}
                 {preview?.kind === 'slot' && (
                   <div className="t-time" style={{ fontWeight: 500, fontSize: 11, opacity: 0.75 }}>

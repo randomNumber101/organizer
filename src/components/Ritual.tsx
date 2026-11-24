@@ -18,7 +18,7 @@ type Step = 'leftover' | 'pick' | 'order' | 'summary' | 'achieved' | 'open' | 't
 const PLAN_STEPS: Step[] = ['leftover', 'pick', 'order', 'summary']
 const REVIEW_STEPS: Step[] = ['achieved', 'open', 'tomorrow']
 
-const byPrio = (a: Task, b: Task) => a.priority - b.priority || (a.deadline ?? '9').localeCompare(b.deadline ?? '9') || a.sort - b.sort
+const byPrio = (a: Task, b: Task) => b.priority - a.priority || (a.deadline ?? '9').localeCompare(b.deadline ?? '9') || a.sort - b.sort
 
 /** Morgens den Tag planen, abends abschließen – Schritt für Schritt */
 export default function Ritual() {

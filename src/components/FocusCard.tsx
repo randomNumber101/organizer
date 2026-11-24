@@ -3,7 +3,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { Check as CheckIcon, Pause, Play, Plus, SkipForward, Square, Timer } from 'lucide-react'
+import { Check as CheckIcon, CheckCheck, Pause, Play, Plus, SkipForward, Square, Timer } from 'lucide-react'
 import { useStore, type Focus } from '../store'
 import type { Task } from '../lib/types'
 import { minutesText, nextUp } from '../lib/dayplan'
@@ -28,12 +28,12 @@ const clock = (ms: number) => {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
-export function FocusCard({ rows, total }: { rows: Task[]; total: number }) {
+export function FocusCard({ rows, total, waiting }: { rows: Task[]; total: number; waiting?: Set<string> }) {
   const tasks = useStore((s) => s.tasks)
   const focus = useStore((s) => s.focus)
-  const { startFocus, pauseFocus, resumeFocus, extendFocus, stopFocus, toggleDone, setDayOrder, select } = useStore.getState()
+  const { startFocus, pauseFocus, resumeFocus, extendFocus, stopFocus, toggleDone, setDayOrder, select, openSplit } = useStore.getState()
   const focused = focus && tasks[focus.id]?.status === 'open' ? tasks[focus.id] : null
-  const task = focused ?? nextUp(rows)
+  const task = focused ?? nextUp(rows, Date.now(), waiting)
   useTick(!!focus && focus.endsAt !== null)
 
   if (!task) return null
@@ -44,6 +44,7 @@ export function FocusCard({ rows, total }: { rows: Task[]; total: number }) {
   const pos = rows.findIndex((t) => t.id === task.id)
   const crumb = ancestors(tasks, task)
   const minutes = task.estimate ?? 25
+  const elapsedMin = onThis ? Math.max(5, Math.round((focus!.minutes * 60_000 - Math.max(0, left)) / 60_000 / 5) * 5) : 0
   const hasKids = Object.values(tasks).some((k) => k.parent_id === task.id)
 
   const later = () => {
@@ -119,6 +120,11 @@ export function FocusCard({ rows, total }: { rows: Task[]; total: number }) {
             </button>
           )}
           <span style={{ flex: 1 }} />
+          {!task.rrule && (onThis ? elapsedMin >= 5 : (task.estimate ?? 0) >= 30) && (
+            <button className="btn ghost" onClick={() => openSplit(task.id, 'log', onThis ? elapsedMin : undefined)} title="Geschaffte Zeit abhaken, der Rest bleibt als nächster Teil">
+              <CheckCheck size={15} /> Teil erledigt{onThis ? ` · ${minutesText(elapsedMin)}` : ''}
+            </button>
+          )}
           {onThis && (
             <button className="btn ghost" onClick={stopFocus} title="Timer beenden">
               <Square size={14} /> Stopp

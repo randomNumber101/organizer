@@ -45,14 +45,15 @@ export function dayCompare(a: Task, b: Task): number {
   if (a.start_at && b.start_at) return a.start_at.localeCompare(b.start_at)
   if (a.start_at) return -1
   if (b.start_at) return 1
-  return a.priority - b.priority || (a.deadline ?? '9').localeCompare(b.deadline ?? '9') || a.created_at.localeCompare(b.created_at)
+  return b.priority - a.priority || (a.deadline ?? '9').localeCompare(b.deadline ?? '9') || a.created_at.localeCompare(b.created_at)
 }
 
 export interface DayPlan {
-  /** offene, machbare Aufgaben des Tages in Reihenfolge (Unteraufgaben hängen an ihrer Aufgabe) */
+  /** offene Aufgaben des Tages in Reihenfolge (Unteraufgaben hängen an ihrer Aufgabe), wartende inklusive */
   rows: Task[]
-  /** warten noch auf andere Aufgaben */
+  /** davon: warten noch auf andere Aufgaben */
   blocked: Task[]
+  waiting: Set<string>
   /** heute erledigt */
   done: Task[]
   /** geschätzte Minuten der offenen Aufgaben */
@@ -65,8 +66,9 @@ export function planDay(tasks: Record<string, Task>, day: string, search = ''): 
   const onDay = (t: Task) => t.due_date === day
   const nestedUnder = (t: Task) => ancestors(tasks, t).some((a) => onDay(a) && a.status === t.status)
   const open = Object.values(tasks).filter((t) => t.status === 'open' && onDay(t) && !nestedUnder(t) && matchesSearch(t, search))
-  const rows = open.filter((t) => !isBlocked(tasks, t)).sort(dayCompare)
-  const blocked = open.filter((t) => isBlocked(tasks, t)).sort(dayCompare)
+  const rows = open.sort(dayCompare)
+  const blocked = rows.filter((t) => isBlocked(tasks, t))
+  const waiting = new Set(blocked.map((t) => t.id))
   const done = Object.values(tasks)
     .filter((t) => t.status === 'done' && (onDay(t) || (!!t.completed_at && localDayOf(t.completed_at) === day)) && !ancestors(tasks, t).some((a) => a.status === 'done' && (onDay(a) || (!!a.completed_at && localDayOf(a.completed_at) === day))))
     .filter((t) => matchesSearch(t, search))
@@ -78,12 +80,12 @@ export function planDay(tasks: Record<string, Task>, day: string, search = ''): 
     else if (t.estimate) minutes += t.estimate
     else unknown++
   }
-  return { rows, blocked, done, minutes, unknown }
+  return { rows, blocked, waiting, done, minutes, unknown }
 }
 
-/** Was als Nächstes dran ist: erste Aufgabe der Reihenfolge (Termine erst kurz vor ihrer Zeit) */
-export function nextUp(rows: Task[], now = Date.now()): Task | undefined {
-  return rows.find((t) => !t.start_at || Date.parse(t.start_at) <= now + 30 * 60_000)
+/** Was als Nächstes dran ist: erste machbare Aufgabe der Reihenfolge (Termine erst kurz vor ihrer Zeit) */
+export function nextUp(rows: Task[], now = Date.now(), waiting: Set<string> = new Set()): Task | undefined {
+  return rows.find((t) => !waiting.has(t.id) && (!t.start_at || Date.parse(t.start_at) <= now + 30 * 60_000))
 }
 
 const minutesNow = (d = new Date()) => d.getHours() * 60 + d.getMinutes()

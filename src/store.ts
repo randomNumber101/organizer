@@ -1,9 +1,12 @@
 import { create } from 'zustand'
 import { ApiError, api, connectLive, setUnauthorizedHandler } from './lib/api'
 import type { SyncResult } from './lib/api'
-import type { BoardMode, CalendarEvent, GoogleStatus, List, Prefs, SavedView, Task, TaskFilter, TaskPatch, Template, TemplateNode, TodayMode, ViewName } from './lib/types'
-import { addDaysStr, deviceTimeZone, isoFromDayMinutes, minutesBetween, shortDate, todayStr } from './lib/dates'
+import type { BoardMode, CalView, EventInput, CalendarEvent, GoogleStatus, List, Prefs, SavedView, Task, TaskFilter, TaskPatch, Template, TemplateNode, TodayMode, ViewName } from './lib/types'
+import { addDaysStr, deviceTimeZone, isoFromDayMinutes, localDayOf, minutesBetween, shortDate, todayStr } from './lib/dates'
+import { EVENT_COLOR_NAMES } from './lib/calendar'
 import { childrenOf, compareTasks, descendantIds } from './lib/tree'
+import { halve, hasParts, isPart, partsOf, remaining } from './lib/parts'
+import { minutesText } from './lib/dayplan'
 import { load, save } from './lib/storage'
 import { moveBlockToDate } from '../shared/tz'
 import { applyOp, clearLocal, emptyData, loadCache, loadOutbox, makeOp, mergeEffect, saveCache, saveOutbox, sendOp, type Data, type Op, type OpBody } from './lib/ops'
@@ -22,6 +25,26 @@ export interface NewTask extends TaskPatch {
 }
 
 export type RitualKind = 'plan' | 'review'
+
+/** Wo ein Teil (bzw. der Rest) einer Aufgabe landet */
+export interface PartPlace {
+  due_date: string | null
+  start_at?: string | null
+  end_at?: string | null
+  timezone?: string | null
+  day_order?: number | null
+}
+export type EventEditorState =
+  | { mode: 'new'; draft: Partial<EventInput> & { asTask?: boolean }; anchor?: { x: number; y: number } }
+  | { mode: 'edit'; event: CalendarEvent; anchor?: { x: number; y: number } }
+
+export interface PartSpec {
+  estimate: number | null
+  done?: boolean
+  place: PartPlace
+}
+/** Rest nach „Teil erledigt“: an derselben Stelle, später am selben Tag, morgen, an einem Tag, ohne Datum */
+export type RestTarget = 'keep' | 'later' | 'tomorrow' | 'none' | { date: string }
 
 /** Fokus-Timer: läuft (endsAt) oder pausiert (left = verbleibende ms) */
 export interface Focus {
@@ -69,7 +92,13 @@ interface State {
   dragging: boolean
   todayMode: TodayMode
   calendarPanel: boolean
+  calView: CalView
+  calSidebar: boolean
+  /** Termin anlegen/bearbeiten */
+  eventEditor: EventEditorState | null
   focus: Focus | null
+  /** Dialog „Aufteilen“ / „Teil erledigt“ */
+  splitFor: { id: string; mode: 'split' | 'log'; minutes?: number } | null
 
   google: GoogleStatus | null
   events: Record<string, CalendarEvent[]>
@@ -106,6 +135,14 @@ interface State {
   setShowNums: (v: boolean) => void
   setTodayMode: (m: TodayMode) => void
   setCalendarPanel: (open: boolean) => void
+  setCalView: (v: CalView) => void
+  setCalSidebar: (open: boolean) => void
+  openEventEditor: (e: EventEditorState | null) => void
+  createEvent: (input: EventInput) => Promise<CalendarEvent | null>
+  updateEvent: (ev: CalendarEvent, patch: Partial<EventInput>, opts?: { all?: boolean; toCalendar?: string }) => Promise<boolean>
+  deleteEvent: (ev: CalendarEvent, all?: boolean) => Promise<void>
+  setCalendarVisible: (id: string, on: boolean) => void
+  setCalendarColor: (id: string, color: string | null) => void
   startFocus: (id: string, minutes: number) => void
   pauseFocus: () => void
   resumeFocus: () => void
@@ -113,6 +150,13 @@ interface State {
   stopFocus: () => void
   /** Tagesreihenfolge setzen: ids in gewünschter Reihenfolge (moved = die gerade verschobene) */
   setDayOrder: (ids: string[], moved?: string) => void
+  /** Aufgabe in Teile zerlegen (specs[0] = erster Teil bzw. der Teil selbst); gibt die neuen Teile zurück */
+  splitTask: (id: string, specs: PartSpec[], opts?: { toast?: string | false }) => string[]
+  /** „Teil erledigt“: geschaffte Minuten abhaken, der Rest bleibt als nächster Teil */
+  logWork: (id: string, minutes: number, rest: RestTarget) => void
+  /** Strg+Ziehen: einen Teil abspalten und an eine andere Stelle legen */
+  splitOff: (id: string, place: PartPlace) => string | null
+  openSplit: (id: string | null, mode?: 'split' | 'log', minutes?: number) => void
   setDragging: (d: boolean) => void
 
   createTask: (input: NewTask) => Task
@@ -341,6 +385,11 @@ export const useStore = create<State>()((set, get) => {
       dirty = true
       get().setView(view)
     }
+    const day = params.get('day')
+    if (day && /^\d{4}-\d{2}-\d{2}$/.test(day)) {
+      dirty = true
+      get().setFocusDay(day)
+    }
     const action = params.get('action')
     if (action) {
       dirty = true
@@ -407,7 +456,11 @@ export const useStore = create<State>()((set, get) => {
     showNums: load<boolean>('showNums', true),
     todayMode: load<TodayMode>('todayMode', 'order'),
     calendarPanel: load<boolean>('calendarPanel', false),
+    calView: load<CalView>('calView', typeof window !== 'undefined' && window.innerWidth < 820 ? '3day' : 'week'),
+    calSidebar: load<boolean>('calSidebar', true),
+    eventEditor: null,
     focus: load<Focus | null>('focus', null),
+    splitFor: null,
     dragging: false,
 
     google: null,
@@ -585,6 +638,106 @@ export const useStore = create<State>()((set, get) => {
       save('todayMode', todayMode)
       set({ todayMode })
     },
+    setCalView: (calView) => {
+      save('calView', calView)
+      set({ calView })
+    },
+    setCalSidebar: (calSidebar) => {
+      save('calSidebar', calSidebar)
+      set({ calSidebar })
+    },
+    openEventEditor: (eventEditor) => set({ eventEditor }),
+
+    createEvent: async (input) => {
+      const tmp: CalendarEvent = {
+        id: `tmp-${crypto.randomUUID()}`,
+        calendarId: input.calendarId,
+        calendarName: get().google?.calendars?.find((c) => c.id === input.calendarId)?.name ?? '',
+        title: input.title,
+        start: input.start,
+        end: input.end,
+        allDay: input.allDay,
+        color: get().google?.calendars?.find((c) => c.id === input.calendarId)?.color ?? '#5f6b7a',
+        location: input.location ?? null,
+        link: null,
+        description: input.description ?? null,
+        writable: true,
+        colorId: input.colorId ?? null,
+        pending: true,
+      }
+      set((st) => ({ events: addToRanges(st.events, tmp) }))
+      try {
+        const ev = await api.createEvent({ timeZone: deviceTimeZone(), ...input })
+        set((st) => ({ events: mapEvents(st.events, (e) => (e.id === tmp.id ? ev : e)) }))
+        eventRequests.clear()
+        get().showToast(`Termin „${ev.title}“ angelegt`, 'info', () => void get().deleteEvent(ev))
+        return ev
+      } catch (e) {
+        set((st) => ({ events: mapEvents(st.events, (x) => (x.id === tmp.id ? null : x)) }))
+        get().showToast(msg(e), 'error')
+        return null
+      }
+    },
+
+    updateEvent: async (ev, patch, opts = {}) => {
+      const before = ev
+      const optimistic: CalendarEvent = {
+        ...ev,
+        ...(patch.title !== undefined ? { title: patch.title } : {}),
+        ...(patch.start !== undefined ? { start: patch.start } : {}),
+        ...(patch.end !== undefined ? { end: patch.end } : {}),
+        ...(patch.allDay !== undefined ? { allDay: patch.allDay } : {}),
+        ...(patch.location !== undefined ? { location: patch.location } : {}),
+        ...(patch.description !== undefined ? { description: patch.description } : {}),
+        ...(patch.colorId !== undefined ? { colorId: patch.colorId, color: patch.colorId ? (EVENT_COLOR_NAMES.find((c) => c[0] === patch.colorId)?.[1] ?? ev.color) : (get().google?.calendars?.find((c) => c.id === ev.calendarId)?.color ?? ev.color) } : {}),
+        pending: true,
+      }
+      if (!opts.all) set((st) => ({ events: addToRanges(mapEvents(st.events, (e) => (e.id === ev.id && e.calendarId === ev.calendarId ? null : e)), optimistic) }))
+      try {
+        const body = { calendarId: ev.calendarId, id: ev.id, recurringId: ev.recurringId ?? null, all: !!opts.all, toCalendar: opts.toCalendar, patch: { ...patch, ...(patch.start !== undefined || patch.end !== undefined ? { start: patch.start ?? ev.start, end: patch.end ?? ev.end, allDay: patch.allDay ?? ev.allDay, timeZone: deviceTimeZone() } : {}) } }
+        const r = await api.updateEvent(body)
+        if ('id' in r && !opts.all) set((st) => ({ events: addToRanges(mapEvents(st.events, (e) => (e.id === ev.id && e.calendarId === ev.calendarId ? null : e)), r) }))
+        eventRequests.clear()
+        if (opts.all) set({ events: {} })
+        return true
+      } catch (e) {
+        set((st) => ({ events: addToRanges(mapEvents(st.events, (x) => (x.id === ev.id && x.calendarId === ev.calendarId ? null : x)), before) }))
+        get().showToast(msg(e), 'error')
+        return false
+      }
+    },
+
+    deleteEvent: async (ev, all = false) => {
+      set((st) => ({ events: mapEvents(st.events, (e) => ((e.id === ev.id || (all && ev.recurringId && e.recurringId === ev.recurringId)) && e.calendarId === ev.calendarId ? null : e)) }))
+      try {
+        await api.deleteEvent({ calendarId: ev.calendarId, id: ev.id, recurringId: ev.recurringId ?? null, all })
+        eventRequests.clear()
+        const undo =
+          !ev.recurringId && ev.writable
+            ? () =>
+                void get().createEvent({ calendarId: ev.calendarId, title: ev.title, allDay: ev.allDay, start: ev.start, end: ev.end, location: ev.location, description: ev.description ?? null, colorId: ev.colorId ?? null })
+            : undefined
+        get().showToast(all ? `Serie „${ev.title}“ gelöscht` : `Termin „${ev.title}“ gelöscht`, 'info', undo)
+      } catch (e) {
+        set((st) => ({ events: addToRanges(st.events, ev) }))
+        get().showToast(msg(e), 'error')
+      }
+    },
+
+    setCalendarVisible: (id, on) => {
+      const cals = get().google?.calendars ?? []
+      const ids = cals.filter((c) => (c.id === id ? on : c.selected)).map((c) => c.id)
+      void get().setGoogleCalendars(ids)
+    },
+
+    setCalendarColor: (id, color) => {
+      const cur = get().prefs.calendar ?? {}
+      const colors = { ...(cur.colors ?? {}) }
+      if (color) colors[id] = color
+      else delete colors[id]
+      get().setPref('calendar', { ...cur, colors })
+    },
+
     setCalendarPanel: (calendarPanel) => {
       save('calendarPanel', calendarPanel)
       set({ calendarPanel })
@@ -645,6 +798,126 @@ export const useStore = create<State>()((set, get) => {
     },
     setDragging: (dragging) => set({ dragging }),
 
+    splitTask: (id, specs, opts = {}) => {
+      const tasks = get().tasks
+      let src = tasks[id]
+      if (!src || specs.length < 2) return []
+      if (src.rrule) {
+        get().showToast('Wiederkehrende Aufgaben lassen sich nicht aufteilen', 'error')
+        return []
+      }
+      // schon aufgeteilt → den ersten offenen Teil weiter zerlegen
+      if (!isPart(src) && hasParts(tasks, src.id)) {
+        const first = partsOf(tasks, src.id).find((p) => p.status === 'open')
+        if (!first) return []
+        src = first
+      }
+      const today = todayStr()
+      const created: string[] = []
+      const undoOps: OpBody[] = []
+      const parentId = isPart(src) ? src.parent_id! : src.id
+      const base = {
+        title: src.title,
+        list_id: src.list_id,
+        priority: src.priority,
+        horizon: src.horizon,
+        tags: src.tags,
+        blocked_by: src.blocked_by,
+        parent_id: parentId,
+      }
+      const placeOf = (pl: PartPlace) => ({
+        due_date: pl.due_date,
+        start_at: pl.start_at ?? null,
+        end_at: pl.end_at ?? null,
+        timezone: pl.start_at ? (pl.timezone ?? src.timezone ?? deviceTimeZone()) : null,
+        day_order: pl.day_order ?? null,
+      })
+      const makePart = (sp: PartSpec, index: number) => {
+        const t = get().createTask({ ...base, ...placeOf(sp.place), estimate: sp.estimate, part_index: index, sort: src.sort + index })
+        created.push(t.id)
+        if (sp.done) enqueue({ kind: 'setStatus', ids: [t.id], status: 'done', today })
+      }
+      const sumOf = (list: (number | null)[]) => (list.some((m) => m) ? list.reduce<number>((n, m) => n + (m ?? 0), 0) : null)
+
+      if (isPart(src)) {
+        const parent = tasks[parentId]
+        const shift = specs.length - 1
+        for (const sib of partsOf(tasks, parentId)) {
+          if (sib.part_index! > src.part_index!) {
+            enqueue({ kind: 'updateTask', id: sib.id, patch: { part_index: sib.part_index! + shift } })
+            undoOps.push({ kind: 'updateTask', id: sib.id, patch: { part_index: sib.part_index } })
+          }
+        }
+        const [first, ...rest] = specs
+        enqueue({ kind: 'updateTask', id: src.id, patch: { estimate: first.estimate, ...placeOf(first.place) } })
+        undoOps.push({ kind: 'updateTask', id: src.id, patch: { estimate: src.estimate, due_date: src.due_date, start_at: src.start_at, end_at: src.end_at, timezone: src.timezone, day_order: src.day_order } })
+        if (first.done) {
+          enqueue({ kind: 'setStatus', ids: [src.id], status: 'done', today })
+          undoOps.push({ kind: 'setStatus', ids: [src.id], status: 'open', today })
+        }
+        rest.forEach((sp, k) => makePart(sp, src.part_index! + 1 + k))
+        if (parent) {
+          const others = partsOf(get().tasks, parentId).map((p) => p.estimate)
+          enqueue({ kind: 'updateTask', id: parentId, patch: { estimate: sumOf(others) } })
+          undoOps.push({ kind: 'updateTask', id: parentId, patch: { estimate: parent.estimate } })
+        }
+      } else {
+        specs.forEach((sp, k) => makePart(sp, k + 1))
+        enqueue({ kind: 'updateTask', id: src.id, patch: { due_date: null, start_at: null, end_at: null, timezone: null, day_order: null, estimate: sumOf(specs.map((sp) => sp.estimate)) } })
+        undoOps.push({ kind: 'updateTask', id: src.id, patch: { due_date: src.due_date, start_at: src.start_at, end_at: src.end_at, timezone: src.timezone, day_order: src.day_order, estimate: src.estimate } })
+      }
+      if (opts.toast !== false) {
+        const parent = get().tasks[parentId]
+        const n = partsOf(get().tasks, parentId).length
+        get().showToast(opts.toast ?? `„${parent?.title ?? src.title}“ ist jetzt in ${n} Teile aufgeteilt`, 'info', () => {
+          for (const cid of created) enqueue({ kind: 'deleteTask', id: cid })
+          for (const op of undoOps.reverse()) enqueue(op)
+        })
+      }
+      return created
+    },
+
+    logWork: (id, minutes, rest) => {
+      const tasks = get().tasks
+      let t = tasks[id]
+      if (!t) return
+      if (!isPart(t) && hasParts(tasks, t.id)) t = partsOf(tasks, t.id).find((p) => p.status === 'open') ?? t
+      const today = todayStr()
+      const rem = remaining(t.estimate, minutes)
+      if (rem === 0) {
+        get().updateTask(t.id, { estimate: minutes })
+        get().toggleDone(t.id)
+        return
+      }
+      const day = t.due_date ?? today
+      const place: PartPlace =
+        rest === 'keep'
+          ? { due_date: t.due_date, start_at: t.start_at, end_at: t.end_at, timezone: t.timezone, day_order: t.day_order }
+          : rest === 'later'
+            ? { due_date: day, day_order: null }
+            : rest === 'tomorrow'
+              ? { due_date: addDaysStr(today, 1) }
+              : rest === 'none'
+                ? { due_date: null }
+                : { due_date: rest.date }
+      const where = rest === 'keep' || rest === 'later' ? (day === today ? 'später heute' : `am ${shortDate(day)}`) : rest === 'tomorrow' ? 'morgen' : rest === 'none' ? 'ohne Datum' : `am ${shortDate(rest.date)}`
+      if (get().focus?.id === t.id) get().stopFocus()
+      get().splitTask(t.id, [{ estimate: minutes, done: true, place: { due_date: t.due_date ?? today, day_order: t.day_order } }, { estimate: rem, place }], {
+        toast: `${minutesText(minutes)} geschafft · Rest${rem ? ` ${minutesText(rem)}` : ''} ${where}`,
+      })
+    },
+
+    openSplit: (id, mode = 'split', minutes) => set({ splitFor: id ? { id, mode, minutes } : null }),
+
+    splitOff: (id, place) => {
+      const t = get().tasks[id]
+      if (!t) return null
+      const [a, b] = halve(t.estimate)
+      const keep: PartPlace = { due_date: t.due_date, start_at: t.start_at, end_at: t.end_at, timezone: t.timezone, day_order: t.day_order }
+      const ids = get().splitTask(id, [{ estimate: a, place: keep }, { estimate: b, place }])
+      return ids[ids.length - 1] ?? null
+    },
+
     showToast: (text, kind = 'info', undo) => {
       const id = ++toastSeq
       set({ toast: { id, msg: text, kind, undo } })
@@ -660,7 +933,7 @@ export const useStore = create<State>()((set, get) => {
         parent_id: null,
         notes: null,
         status: 'open' as const,
-        priority: 4 as const,
+        priority: 0 as const,
         horizon: 'backlog' as const,
         tags: [],
         due_date: null,
@@ -689,6 +962,21 @@ export const useStore = create<State>()((set, get) => {
       if (patch.start_at && !prev.timezone && !patch.timezone) fullPatch.timezone = deviceTimeZone()
       if (patch.rrule && !prev.due_date && !patch.due_date) fullPatch.due_date = todayStr()
       enqueue({ kind: 'updateTask', id, patch: fullPatch })
+      // Teile ziehen mit: Titel (wenn nicht eigens umbenannt), Wichtigkeit; die Hauptaufgabe zählt die Dauer zusammen
+      const tasks = get().tasks
+      if (hasParts(tasks, id)) {
+        for (const part of partsOf(tasks, id)) {
+          const pp: TaskPatch = {}
+          if ('title' in patch && patch.title !== prev.title && part.title === prev.title) pp.title = patch.title
+          if ('priority' in patch && patch.priority !== part.priority) pp.priority = patch.priority
+          if (Object.keys(pp).length) enqueue({ kind: 'updateTask', id: part.id, patch: pp })
+        }
+      }
+      if ('estimate' in patch && isPart(prev) && tasks[prev.parent_id!]) {
+        const mins = partsOf(tasks, prev.parent_id!).map((p) => p.estimate)
+        const sum = mins.some((m) => m) ? mins.reduce<number>((n, m) => n + (m ?? 0), 0) : null
+        if (sum !== tasks[prev.parent_id!].estimate) enqueue({ kind: 'updateTask', id: prev.parent_id!, patch: { estimate: sum } })
+      }
     },
 
     toggleDone: (id) => {
@@ -696,12 +984,16 @@ export const useStore = create<State>()((set, get) => {
       const task = tasks[id]
       if (!task) return
       const today = todayStr()
+      const parent = isPart(task) ? tasks[task.parent_id!] : undefined
       if (task.status === 'done') {
-        enqueue({ kind: 'setStatus', ids: [id], status: 'open', today })
+        // Teil wieder offen → Hauptaufgabe auch
+        enqueue({ kind: 'setStatus', ids: parent?.status === 'done' ? [id, parent.id] : [id], status: 'open', today })
         return
       }
       const desc = descendantIds(tasks, id)
       const ids = [id, ...desc.filter((d) => tasks[d]?.status === 'open')]
+      // letzter offener Teil → Hauptaufgabe ist fertig (sofern sonst nichts offen ist)
+      if (parent && parent.status === 'open' && !parent.rrule && !childrenOf(tasks, parent.id).some((k) => k.status === 'open' && !ids.includes(k.id))) ids.push(parent.id)
       const prev = [task, ...desc.map((d) => tasks[d]).filter(Boolean)]
       enqueue({ kind: 'setStatus', ids, status: 'done', today })
       if (get().focus?.id === id) get().stopFocus()
@@ -735,8 +1027,16 @@ export const useStore = create<State>()((set, get) => {
     },
 
     moveToDay: (id, day) => {
-      const t = get().tasks[id]
+      let t = get().tasks[id]
       if (!t) return
+      // aufgeteilte Aufgabe: den ersten offenen Teil ohne Tag (sonst den ersten offenen) verschieben
+      if (!isPart(t) && hasParts(get().tasks, t.id)) {
+        const open = partsOf(get().tasks, t.id).filter((p) => p.status === 'open')
+        const pick = open.find((p) => !p.due_date) ?? open[0]
+        if (!pick) return
+        t = pick
+        id = pick.id
+      }
       if (day === null) {
         get().updateTask(id, { due_date: null, start_at: null, end_at: null, timezone: null })
         return
@@ -830,7 +1130,7 @@ export const useStore = create<State>()((set, get) => {
             id: tid,
             title: node.title,
             notes: node.notes ?? null,
-            priority: (node.priority ?? 4) as Task['priority'],
+            priority: (node.priority ?? 0) as Task['priority'],
             tags: node.tags ?? [],
             rrule: isRoot ? (node.rrule ?? null) : null,
             parent_id: parent,
@@ -960,6 +1260,29 @@ export const useStore = create<State>()((set, get) => {
     },
   }
 })
+
+/** Termine in allen geladenen Bereichen umschreiben (null = entfernen) */
+function mapEvents(events: Record<string, CalendarEvent[]>, fn: (e: CalendarEvent) => CalendarEvent | null): Record<string, CalendarEvent[]> {
+  const out: Record<string, CalendarEvent[]> = {}
+  for (const [k, list] of Object.entries(events)) out[k] = list.map(fn).filter((e): e is CalendarEvent => !!e)
+  return out
+}
+
+/** Termin in alle geladenen Bereiche legen, die seinen Beginn enthalten */
+function addToRanges(events: Record<string, CalendarEvent[]>, ev: CalendarEvent): Record<string, CalendarEvent[]> {
+  const day = ev.allDay ? ev.start : localDayOf(ev.start)
+  const out = { ...events }
+  let placed = false
+  for (const [k, list] of Object.entries(events)) {
+    const [f, t] = k.split('|')
+    if (day >= f && day <= t) {
+      out[k] = [...list.filter((e) => !(e.id === ev.id && e.calendarId === ev.calendarId)), ev]
+      placed = true
+    }
+  }
+  if (!placed) out[`${day}|${day}`] = [ev]
+  return out
+}
 
 /** Termine für einen Zeitraum (inkl. aller geladenen Bereiche, die ihn überlappen) */
 export function eventsFor(events: Record<string, CalendarEvent[]>, from: string, to: string): CalendarEvent[] {

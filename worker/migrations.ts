@@ -8,7 +8,12 @@ export interface Migration {
   id: number
   name: string
   statements: string[]
+  /** optional: Umbauten, die sich nicht in reinem SQL ausdrücken lassen (läuft nach den statements, in derselben Transaktion) */
+  run?: (sql: SqlStorage) => void
 }
+
+/** alte Wichtigkeit (1 hoch … 4 ohne) → neue Skala 0–5 (5 = dringend, 0 = ohne) */
+export const upgradePrio = (p: unknown): number => (p === 1 ? 4 : p === 2 ? 3 : p === 3 ? 2 : 0)
 
 export const MIGRATIONS: Migration[] = [
   {
@@ -184,5 +189,49 @@ export const MIGRATIONS: Migration[] = [
       // Reihenfolge innerhalb des Tages, an dem die Aufgabe dran ist („Heute“, „Tag planen“)
       `ALTER TABLE tasks ADD COLUMN day_order REAL`,
     ],
+  },
+  {
+    id: 7,
+    name: 'prio_0_5_and_parts',
+    statements: [
+      // Wichtigkeit 0–5 (5 = dringend, 0 = ohne). Neue Spalte, weil die alte per CHECK auf 1–4 festgelegt ist.
+      `ALTER TABLE tasks ADD COLUMN prio INTEGER NOT NULL DEFAULT 0`,
+      `UPDATE tasks SET prio = CASE priority WHEN 1 THEN 4 WHEN 2 THEN 3 WHEN 3 THEN 2 ELSE 0 END`,
+      // Teil einer aufgeteilten Aufgabe (1, 2, 3 … unter der Hauptaufgabe); NULL = normale Aufgabe
+      `ALTER TABLE tasks ADD COLUMN part_index INTEGER`,
+      // alle Geräte holen sich die umgerechneten Werte beim nächsten Abgleich
+      `UPDATE meta SET value = value + 1 WHERE key = 'seq'`,
+      `UPDATE tasks SET seq = (SELECT value FROM meta WHERE key = 'seq')`,
+      `UPDATE templates SET seq = (SELECT value FROM meta WHERE key = 'seq')`,
+      `UPDATE prefs SET seq = (SELECT value FROM meta WHERE key = 'seq') WHERE key = 'views'`,
+    ],
+    run: (sql) => {
+      type Node = { priority?: unknown; subtasks?: Node[] }
+      const walk = (n: Node) => {
+        if (n && typeof n === 'object') {
+          if ('priority' in n) n.priority = upgradePrio(n.priority)
+          if (Array.isArray(n.subtasks)) n.subtasks.forEach(walk)
+        }
+      }
+      for (const r of sql.exec<{ id: string; payload: string }>(`SELECT id, payload FROM templates`).toArray()) {
+        try {
+          const p = JSON.parse(r.payload) as Node
+          walk(p)
+          sql.exec(`UPDATE templates SET payload = ? WHERE id = ?`, JSON.stringify(p), r.id)
+        } catch {
+          /* kaputte Vorlage bleibt, wie sie ist */
+        }
+      }
+      for (const r of sql.exec<{ value: string }>(`SELECT value FROM prefs WHERE key = 'views'`).toArray()) {
+        try {
+          const views = JSON.parse(r.value) as { filter?: { priorities?: unknown[] } }[]
+          if (!Array.isArray(views)) continue
+          for (const v of views) if (Array.isArray(v?.filter?.priorities)) v.filter!.priorities = [...new Set(v.filter!.priorities.map(upgradePrio))]
+          sql.exec(`UPDATE prefs SET value = ? WHERE key = 'views'`, JSON.stringify(views))
+        } catch {
+          /* egal */
+        }
+      }
+    },
   },
 ]

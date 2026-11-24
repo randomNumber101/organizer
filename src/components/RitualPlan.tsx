@@ -5,9 +5,10 @@
 import { useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ChevronDown, CornerDownRight, GripVertical, Inbox, Plus, Search, X, Zap, Flame } from 'lucide-react'
+import { ChevronDown, CornerDownRight, GripVertical, Inbox, Lock, Plus, Search, X, Zap, Flame } from 'lucide-react'
 import { useStore, eventsFor } from '../store'
 import type { List, Task } from '../lib/types'
+import { IMPORTANT } from '../lib/types'
 import { addDaysStr, localDayOf, timeLabel } from '../lib/dates'
 import { BUCKETS, bucketOf, freeMinutes, minutesText, planDay } from '../lib/dayplan'
 import { DayList } from './DayList'
@@ -18,7 +19,7 @@ import { deadlineDay } from '../lib/filter'
 import { haptic } from '../lib/haptics'
 import { TaskMeta } from './TaskCard'
 
-const byPrio = (a: Task, b: Task) => a.priority - b.priority || (a.deadline ?? '9').localeCompare(b.deadline ?? '9') || compareTasks(a, b)
+const byPrio = (a: Task, b: Task) => b.priority - a.priority || (a.deadline ?? '9').localeCompare(b.deadline ?? '9') || compareTasks(a, b)
 const openKids = (tasks: Record<string, Task>, id: string) => childrenOf(tasks, id).filter((k) => k.status === 'open').sort(compareTasks)
 
 /** Aufgaben so ordnen, dass Unteraufgaben direkt unter ihrer Aufgabe stehen */
@@ -68,10 +69,7 @@ function useGroups(today: string, query: string): Groups {
     const cands = Object.values(tasks).filter((t) => {
       if (t.status !== 'open' || t.start_at || plannedToday(t)) return false
       if (t.due_date && !(soonDeadline(t) && t.due_date > today)) return false
-      if (isBlocked(tasks, t)) {
-        blocked++
-        return false
-      }
+      if (isBlocked(tasks, t)) blocked++
       return true
     })
     const set = new Set(cands.map((t) => t.id))
@@ -79,7 +77,7 @@ function useGroups(today: string, query: string): Groups {
     // Zeilen = Aufgaben, deren Elternaufgabe selbst keine Zeile ist; Unteraufgaben hängen darunter
     const roots = cands.filter((t) => (!t.parent_id || !set.has(t.parent_id)) && hit(t))
     const crumbOf = (t: Task) => ancestors(tasks, t).map((a) => a.title)
-    const important = (t: Task) => t.priority <= 2 || soonDeadline(t)
+    const important = (t: Task) => t.priority >= IMPORTANT || soonDeadline(t)
     const small = (t: Task) => (t.estimate !== null && t.estimate <= 30) || (t.estimate === null && t.horizon === 'short' && openKids(tasks, t.id).length === 0)
 
     const imp = roots.filter(important)
@@ -164,7 +162,7 @@ export function PickStep({ today, children }: { today: string; children?: ReactN
           )}
         </div>
 
-        <Group icon={<Flame size={14} />} title="Wichtig & Fristen" hint="Priorität hoch/mittel oder Frist in den nächsten 7 Tagen" rows={groups.important} today={today} />
+        <Group icon={<Flame size={14} />} title="Wichtig & Fristen" hint="Wichtigkeit 3–5 oder Frist in den nächsten 7 Tagen" rows={groups.important} today={today} />
         <Group icon={<Zap size={14} />} title="Kleinere Aufgaben" hint="bis 30 Min. oder kurzfristig" rows={groups.small} today={today} />
 
         {groups.restCount > 0 && (
@@ -197,7 +195,6 @@ export function PickStep({ today, children }: { today: string; children?: ReactN
           </div>
         )}
         {groups.important.length + groups.small.length + groups.restCount === 0 && <p className="muted small">{query ? 'Nichts gefunden.' : 'Keine offenen Aufgaben ohne Termin.'}</p>}
-        {groups.blocked > 0 && !query && <p className="muted small">{groups.blocked} weitere warten noch auf andere Aufgaben.</p>}
       </section>
     </div>
   )
@@ -225,19 +222,23 @@ function Group({ icon, title, hint, rows, today }: { icon: ReactNode; title: str
 /** Vorschlag: antippen = für heute; Unteraufgaben einzeln übernehmbar */
 function SuggestRow({ task, crumb, today, showList = true }: { task: Task; crumb: string[]; today: string; showList?: boolean }) {
   const moveToDay = useStore((s) => s.moveToDay)
+  const waiting = useStore((s) => isBlocked(s.tasks, task))
   const add = (id: string) => {
     haptic(8)
     moveToDay(id, today)
   }
   return (
     <motion.div layout="position" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, x: -30, height: 0 }} className="r-tree">
-      <div className="r-row compact suggest" role="button" tabIndex={0} onClick={() => add(task.id)} onKeyDown={(e) => e.key === 'Enter' && add(task.id)}>
+      <div className={`r-row compact suggest ${waiting ? 'waiting' : ''}`} role="button" tabIndex={0} onClick={() => add(task.id)} onKeyDown={(e) => e.key === 'Enter' && add(task.id)}>
         <span className="r-plus" aria-hidden>
           <Plus size={15} />
         </span>
         <div className="r-row-main">
           <Crumb path={crumb} />
-          <span className="r-row-title">{task.title}</span>
+          <span className="r-row-title">
+            {waiting && <Lock size={13} className="wait-lock" aria-label="wartet" />}
+            {task.title}
+          </span>
           <TaskMeta task={task} showList={showList} showSubs={false} />
         </div>
       </div>

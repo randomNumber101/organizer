@@ -57,7 +57,7 @@ export function newTaskFrom(body: NewTaskBody, ts: string): Task {
     parent_id: null,
     notes: null,
     status: 'open',
-    priority: 4,
+    priority: 0,
     horizon: 'backlog',
     tags: [],
     due_date: null,
@@ -77,6 +77,7 @@ export function newTaskFrom(body: NewTaskBody, ts: string): Task {
     estimate: null,
     gtask_id: null,
     day_order: null,
+    part_index: null,
     created_at: ts,
     updated_at: ts,
     ...body,
@@ -231,8 +232,71 @@ export function mergeEffect(base: Data, e: Effect): Data {
 // ---------------------------------------------------------------------------
 // Speicher auf dem Gerät
 // ---------------------------------------------------------------------------
-const CACHE = 'organizer:cache:v1'
-const OUTBOX = 'organizer:outbox:v1'
+const CACHE = 'organizer:cache:v2'
+const OUTBOX = 'organizer:outbox:v2'
+// bis Version 0.7: Wichtigkeit 1 (hoch) … 4 (ohne)
+const CACHE_V1 = 'organizer:cache:v1'
+const OUTBOX_V1 = 'organizer:outbox:v1'
+
+/** alte Wichtigkeit (1 hoch … 4 ohne) → 0–5 (5 = dringend) */
+export const upgradePrio = (p: unknown): Task['priority'] => (p === 1 ? 4 : p === 2 ? 3 : p === 3 ? 2 : 0)
+
+function upgradeNode(n: TemplateNode): TemplateNode {
+  return { ...n, ...(n.priority !== undefined ? { priority: upgradePrio(n.priority) } : {}), ...(n.subtasks ? { subtasks: n.subtasks.map(upgradeNode) } : {}) }
+}
+
+function upgradeViews(v: unknown): unknown {
+  return Array.isArray(v) ? v.map((x) => (x?.filter?.priorities ? { ...x, filter: { ...x.filter, priorities: [...new Set((x.filter.priorities as unknown[]).map(upgradePrio))] } } : x)) : v
+}
+
+function upgradeData(d: Data): Data {
+  const tasks: Data['tasks'] = {}
+  for (const [id, t] of Object.entries(d.tasks ?? {})) tasks[id] = { ...t, priority: upgradePrio(t.priority), part_index: null }
+  const templates: Data['templates'] = {}
+  for (const [id, t] of Object.entries(d.templates ?? {})) templates[id] = { ...t, payload: upgradeNode(t.payload) }
+  return { ...d, tasks, templates, prefs: { ...d.prefs, views: upgradeViews(d.prefs?.views) as Prefs['views'] } }
+}
+
+function upgradeOp(op: Op): Op {
+  switch (op.kind) {
+    case 'createTask':
+      return op.body.priority !== undefined ? { ...op, body: { ...op.body, priority: upgradePrio(op.body.priority) } } : op
+    case 'updateTask':
+      return op.patch.priority !== undefined ? { ...op, patch: { ...op.patch, priority: upgradePrio(op.patch.priority) } } : op
+    case 'restoreTasks':
+      return { ...op, rows: op.rows.map((t) => ({ ...t, priority: upgradePrio(t.priority) })) }
+    case 'saveTemplate':
+      return op.payload ? { ...op, payload: upgradeNode(op.payload) } : op
+    case 'setPref':
+      return op.key === 'views' ? { ...op, value: upgradeViews(op.value) } : op
+    default:
+      return op
+  }
+}
+
+/** einmalig: Daten einer älteren Version auf die neue Wichtigkeits-Skala heben */
+function migrateLocal() {
+  try {
+    const oldCache = localStorage.getItem(CACHE_V1)
+    if (oldCache !== null) {
+      if (localStorage.getItem(CACHE) === null) {
+        const c = JSON.parse(oldCache) as { base: Data; cursor: number }
+        localStorage.setItem(CACHE, JSON.stringify({ ...c, base: upgradeData({ ...emptyData(), ...c.base }) }))
+      }
+      localStorage.removeItem(CACHE_V1)
+    }
+    const oldOut = localStorage.getItem(OUTBOX_V1)
+    if (oldOut !== null) {
+      const ops = (JSON.parse(oldOut) as Op[]).map(upgradeOp)
+      const cur = JSON.parse(localStorage.getItem(OUTBOX) ?? '[]') as Op[]
+      localStorage.setItem(OUTBOX, JSON.stringify([...ops, ...cur]))
+      localStorage.removeItem(OUTBOX_V1)
+    }
+  } catch {
+    /* im schlimmsten Fall holt der Abgleich alles neu */
+  }
+}
+migrateLocal()
 
 export function loadCache(): { base: Data; cursor: number } | null {
   try {
@@ -275,8 +339,7 @@ export function saveOutbox(ops: Op[]) {
 
 export function clearLocal() {
   try {
-    localStorage.removeItem(CACHE)
-    localStorage.removeItem(OUTBOX)
+    for (const k of [CACHE, OUTBOX, CACHE_V1, OUTBOX_V1]) localStorage.removeItem(k)
   } catch {
     /* egal */
   }

@@ -8,6 +8,7 @@
  * farbig markieren können. Text in "Anführungszeichen" wird nie ausgewertet.
  */
 import type { Horizon, List, Priority, Task } from './types'
+import { PRIORITY_LABEL } from './types'
 import { addDaysStr, nextWeekdayStr } from './dates'
 
 export type TokenKind = 'date' | 'time' | 'deadline' | 'wait' | 'parent' | 'prio' | 'horizon' | 'repeat' | 'duration' | 'list' | 'tag' | 'note'
@@ -548,18 +549,18 @@ export function parseLang(input: string, ctx: LangContext): Parsed {
     },
   )
 
-  // Wichtigkeit
-  sc.rule(new RegExp(`(?<=^|[\\s\\u0000])(?:!([1-4])|!!!|!!)(?=$|[\\s\\u0000])`, 'gu'), 'prio', (m) => {
-    const p = (m[1] ? Number(m[1]) : m[0] === '!!!' ? 1 : 2) as Priority
+  // Wichtigkeit 0–5 (5 = dringend)
+  sc.rule(new RegExp(`(?<=^|[\\s\\u0000])(?:!([0-5])|!!!|!!)(?=$|[\\s\\u0000])`, 'gu'), 'prio', (m) => {
+    const p = (m[1] ? Number(m[1]) : m[0] === '!!!' ? 5 : 4) as Priority
     out.priority = p
-    return ['', 'Hoch', 'Mittel', 'Niedrig', 'Keine Priorität'][p]
+    return `Wichtigkeit ${p} · ${PRIORITY_LABEL[p]}`
   })
-  if (!out.priority) {
-    sc.rule(rx(`sehr${S}wichtig|dringend|asap|wichtig|prio(?:rität)?[ \\t]?([1-3])|p([1-3])|unwichtig|nebensächlich|niedrige${S}priorität`), 'prio', (m) => {
+  if (out.priority === undefined) {
+    sc.rule(rx(`sehr${S}wichtig|dringend|asap|wichtig|prio(?:rität)?[ \\t]?([0-5])|p([0-5])|unwichtig|nebensächlich|niedrige${S}priorität`), 'prio', (m) => {
       const t = m[0].toLowerCase()
-      const p = (m[1] || m[2] ? Number(m[1] ?? m[2]) : /unwichtig|nebensächlich|niedrige/.test(t) ? 3 : 1) as Priority
+      const p = (m[1] || m[2] ? Number(m[1] ?? m[2]) : /unwichtig|nebensächlich|niedrige/.test(t) ? 1 : /sehr|dringend|asap/.test(t) ? 5 : 4) as Priority
       out.priority = p
-      return ['', 'Hoch', 'Mittel', 'Niedrig'][p]
+      return `Wichtigkeit ${p} · ${PRIORITY_LABEL[p]}`
     })
   }
 

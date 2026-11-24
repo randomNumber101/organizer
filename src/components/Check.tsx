@@ -14,7 +14,7 @@ interface Props {
  * Rundes Häkchen. Beim Abhaken füllt es sich zuerst sichtbar, erst danach wird die Aufgabe erledigt –
  * so sieht man, was passiert ist, bevor die Karte verschwindet.
  */
-export default function Check({ done, priority = 4, size, onToggle, label }: Props) {
+export default function Check({ done, priority = 0, size, onToggle, label }: Props) {
   const [pending, setPending] = useState(false)
   const shown = done || pending
 

@@ -1,4 +1,4 @@
-import type { CalendarEvent, GoogleStatus, List, Prefs, Task, TaskPatch, Template, TemplateNode } from './types'
+import type { CalendarEvent, EventInput, GoogleStatus, List, Prefs, Task, TaskPatch, Template, TemplateNode } from './types'
 
 export class ApiError extends Error {
   constructor(
@@ -29,6 +29,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const headers: Record<string, string> = {}
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   if (currentOpId) headers['X-Op-Id'] = currentOpId
+  // Wichtigkeit 0–5 (ältere Versionen schickten 1–4, der Server rechnet die um)
+  headers['X-Scale'] = '2'
   let res: Response
   try {
     res = await fetch(path, {
@@ -94,6 +96,10 @@ export const api = {
   googleCalendars: (selected: string[]) => request<{ ok: true }>('POST', '/api/google/calendars', { selected }),
   googleTasks: (enabled: boolean) => request<GoogleStatus>('POST', '/api/google/tasks', { enabled }),
   googleRefresh: () => request<{ ok: true }>('POST', '/api/google/refresh'),
+  createEvent: (input: EventInput) => request<CalendarEvent>('POST', '/api/google/events', input),
+  updateEvent: (body: { calendarId: string; id: string; recurringId?: string | null; all?: boolean; toCalendar?: string; patch: Partial<EventInput> }) => request<CalendarEvent | { ok: true }>('PATCH', '/api/google/events', body),
+  deleteEvent: (body: { calendarId: string; id: string; recurringId?: string | null; all?: boolean }) => request<{ ok: true }>('POST', '/api/google/events/delete', body),
+  searchEvents: (q: string) => request<{ events: CalendarEvent[] }>('GET', `/api/google/search?q=${encodeURIComponent(q)}`),
 }
 
 /**

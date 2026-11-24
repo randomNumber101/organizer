@@ -23,7 +23,7 @@ export function composeTask(text: string, defaults: TaskPatch, lists: Record<str
   const patch: TaskPatch & { title: string } = {
     ...defaults,
     title: parsed.title,
-    priority: parsed.priority ?? defaults.priority ?? 4,
+    priority: parsed.priority ?? defaults.priority ?? 0,
     tags: [...new Set([...(defaults.tags ?? []), ...parsed.tags])],
     list_id: parsed.list?.id ?? (parent ? parent.list_id : defaults.list_id) ?? null,
     due_date: parsed.dueDate ?? defaults.due_date ?? null,
@@ -78,7 +78,7 @@ export function applyToTask(task: Task, text: string, lists: Record<string, List
     else patch.due_date = parsed.dueDate
   }
   if (parsed.deadline) patch.deadline = parsed.deadline
-  if (parsed.priority) patch.priority = parsed.priority
+  if (parsed.priority !== undefined) patch.priority = parsed.priority
   if (parsed.horizon) patch.horizon = parsed.horizon
   if (parsed.rrule) {
     patch.rrule = parsed.rrule

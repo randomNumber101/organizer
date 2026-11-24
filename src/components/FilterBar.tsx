@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { Filter, Flag, Hourglass, Lock, Save, Unlock, X } from 'lucide-react'
 import { useStore } from '../store'
 import type { SavedView, TaskFilter, WhenFilter } from '../lib/types'
-import { PRIORITY_LABEL } from '../lib/types'
+import { PRIORITIES, PRIORITY_LABEL } from '../lib/types'
 import { WHEN_LABEL, allTags, filterCount, isFilterActive } from '../lib/filter'
 import { useIsMobile } from '../hooks/useMedia'
 
@@ -138,10 +138,10 @@ function PanelBody() {
         </FilterGroup>
 
         <FilterGroup label="Priorität">
-          {[1, 2, 3].map((p) => (
-            <button key={p} className={`opt prio-${p} ${filter.priorities?.includes(p) ? 'on' : ''}`} onClick={() => set({ priorities: toggle(filter.priorities, p) })}>
-              <Flag />
-              {PRIORITY_LABEL[p as 1 | 2 | 3]}
+          {PRIORITIES.map((p) => (
+            <button key={p} className={`opt prio-${p} ${filter.priorities?.includes(p) ? 'on' : ''}`} onClick={() => set({ priorities: toggle(filter.priorities, p) })} title={`Wichtigkeit ${p}`}>
+              {p > 0 ? <span className={`prio-num p${p}`}>{p}</span> : <Flag />}
+              {PRIORITY_LABEL[p]}
             </button>
           ))}
         </FilterGroup>

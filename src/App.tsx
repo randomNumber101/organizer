@@ -18,6 +18,8 @@ import CommandPalette from './components/CommandPalette'
 import TemplatePicker from './components/TemplatePicker'
 import { FilterPanel } from './components/FilterBar'
 import { FocusWatcher } from './components/FocusCard'
+import SplitDialog from './components/SplitDialog'
+import EventEditor from './components/EventEditor'
 import { todayStr } from './lib/dates'
 
 const ORDER: ViewName[] = ['board', 'today', 'calendar']
@@ -94,6 +96,8 @@ export default function App() {
           <FilterPanel />
           <CommandPalette />
           <FocusWatcher />
+          <SplitDialog />
+          <EventEditor />
           <Toast />
         </div>
       )}

@@ -3,7 +3,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { CalendarDays, ChevronDown, ChevronLeft, ChevronRight, Clock, Flag, Hourglass, ListOrdered, Lock, Moon, Sun, Timer, X } from 'lucide-react'
+import { CalendarDays, ChevronDown, ChevronLeft, ChevronRight, Clock, Flag, Hourglass, ListOrdered, Moon, Sun, Timer, X } from 'lucide-react'
 import { useStore, eventsFor } from '../store'
 import type { Task, TodayMode } from '../lib/types'
 import { addDaysStr, dayLabel, dayNum, daysFrom, longDayLabel, timeLabel, todayStr, weekStart, weekdayShort } from '../lib/dates'
@@ -47,7 +47,7 @@ export default function TodayView() {
 
   const plan = useMemo(() => planDay(tasks, focusDay, search), [tasks, focusDay, search])
   const dayEvents = useMemo(() => eventsFor(events, focusDay, focusDay), [events, focusDay])
-  const total = plan.rows.length + plan.blocked.length + plan.done.length
+  const total = plan.rows.length + plan.done.length
 
   return (
     <div className="view">
@@ -59,8 +59,8 @@ export default function TodayView() {
             <div className="today-body">
               <div className="today-side">
                 <DayProgress rows={plan.rows} done={plan.done.length} total={total} minutes={plan.minutes} events={dayEvents} />
-                {isToday && <FocusCard rows={plan.rows} total={plan.rows.length} />}
-                {isToday && <GapHint rows={plan.rows} events={dayEvents} />}
+                {isToday && <FocusCard rows={plan.rows} total={plan.rows.length} waiting={plan.waiting} />}
+                {isToday && <GapHint rows={plan.rows.filter((t) => !plan.waiting.has(t.id))} events={dayEvents} />}
               </div>
 
               <div className="today-list">
@@ -77,13 +77,6 @@ export default function TodayView() {
                 )}
 
                 {isToday && <Leftovers />}
-                {plan.blocked.length > 0 && (
-                  <Fold title="Wartet noch" icon={<Lock size={14} />} count={plan.blocked.length}>
-                    {plan.blocked.map((t) => (
-                      <DayRow key={t.id} task={t} day={focusDay} rows={plan.rows} muted />
-                    ))}
-                  </Fold>
-                )}
                 <SoonDeadlines day={focusDay} />
                 {plan.done.length > 0 && (
                   <Fold title="Erledigt" count={plan.done.length}>
@@ -107,7 +100,7 @@ export default function TodayView() {
                 </button>
               </div>
               <PlanDnd hourPx={52}>
-                <Timeline days={[focusDay]} hourPx={52} showHeader={false} allDayTasks={false} />
+                <Timeline days={[focusDay]} hourPx={52} showHeader={false} allDayTasks={false} createTask />
               </PlanDnd>
             </motion.aside>
           )}
@@ -414,7 +407,7 @@ function CalendarSheet({ open, day, onClose }: { open: boolean; day: string; onC
               </button>
             </div>
             <PlanDnd hourPx={56}>
-              <Timeline days={[day]} hourPx={56} showHeader={false} allDayTasks={false} />
+              <Timeline days={[day]} hourPx={56} showHeader={false} allDayTasks={false} createTask />
             </PlanDnd>
           </motion.aside>
         </>
