@@ -43,6 +43,8 @@ export interface Task {
   estimate: number | null
   /** verknüpfte Google Aufgabe (Aufgaben mit Tag, ohne Uhrzeit) */
   gtask_id?: string | null
+  /** Reihenfolge innerhalb des Tages (null = noch nicht einsortiert) */
+  day_order: number | null
   created_at: string
   updated_at: string
 }
@@ -139,9 +141,13 @@ export interface PushPrefs {
   lead: number
 }
 
+export type TodayMode = 'order' | 'duration' | 'prio'
+
 export interface Prefs {
   views?: SavedView[]
   push?: PushPrefs
   ritual?: { planned?: string; reviewed?: string }
+  /** Tagesende für „noch frei“ in Heute (HH:mm) */
+  day?: { end?: string }
   board?: Record<string, unknown>
 }

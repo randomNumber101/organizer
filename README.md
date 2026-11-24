@@ -10,8 +10,11 @@ Tages- und Zeitblock-Planung, Live-Sync zwischen Handy und Laptop.
 - **Board** – Spalten = Listen, ganz links der Stapel **Unsortiert**. Karten per Drag & Drop verschieben und sortieren
   (Handy: lange drücken), Spalten am Titel verschieben. Umschalter **Woche**: Spalten = die nächsten 7 Tage.
 - **Einsortieren** – Knopf im Stapel „Unsortiert“: Karte für Karte einer Liste (Taste 1–9) und optional einem Tag (H/M/W/N) zuordnen.
-- **Heute** – Aufgaben des Tages links, Zeitraster mit Google-Terminen rechts. Aufgaben ins Raster ziehen = einplanen,
-  Blöcke verschieben, unten am Block ziehen = Dauer ändern, zurück in „Zu planen“ ziehen = Uhrzeit weg.
+- **Heute** – den Tag gestalten, ohne Uhrzeiten: die Aufgaben des Tages in **eigener Reihenfolge** (am Griff ziehen,
+  Menü „Als Nächstes“/„Ans Ende“), umschaltbar auf **Dauer** (Mini ≤ 5 min · Zwischendurch ≤ 15 min · Länger ≥ 30 min · ohne Dauer)
+  und **Priorität**. Dauer-Chip antippen = schätzen. Oben **Als Nächstes** mit **Fokus-Timer** (Pause, +5 min, „Später“),
+  Fortschritt, Zeit bis Tagesende und Hinweis, was bis zum nächsten Termin noch reinpasst. Darunter „Liegen geblieben“,
+  „Wartet noch“, „Fristen bald“, „Erledigt“. Der Kalender ist über das Kalender-Symbol seitlich einblendbar (Handy: Blatt von unten).
 - **Kalender** – Wochenansicht (Handy: 3 Tage). Klick auf einen Termin → „Als Aufgabe übernehmen“. Klick in eine freie Stelle → neue Aufgabe zu der Uhrzeit.
 - **Eingabesprache** – überall, wo man Aufgaben tippt (Schnelleingabe `N`, Spalten, „Heute“, Strg+K, Unteraufgaben
   und auch beim Umbenennen im Aufgaben-Blatt). Erkannte Teile werden farbig markiert und als Felder übernommen:
@@ -33,7 +36,8 @@ Tages- und Zeitblock-Planung, Live-Sync zwischen Handy und Laptop.
 - **Befehle** (`Strg`/`⌘`+`K`): Aufgaben, Listen, Vorlagen, Ansichten finden, Aktionen ausführen – oder direkt neue Aufgabe tippen.
 - **Tag planen / abschließen**: morgens Reste klären → aus allen Aufgaben ohne Termin wählen (gruppiert: *Wichtig & Fristen*,
   *Kleinere Aufgaben*, *Alle anderen* nach Listen, mit Suche; Unteraufgaben stehen unter ihrer Aufgabe und lassen sich auch einzeln holen)
-  → Reihenfolge per Ziehen, Dauer 5 min–2 h → nacheinander in freie Lücken einplanen; abends Rückblick und Offenes bewusst verschieben.
+  → Reihenfolge per Ziehen und Dauer schätzen (ohne Uhrzeiten) → „Heute“ zeigt danach immer, was als Nächstes dran ist;
+  abends Rückblick und Offenes bewusst verschieben.
 - **Offline**: Änderungen wirken sofort und warten bei fehlendem Netz in einer Warteschlange (Anzeige oben), die App startet auch ohne Netz.
 - **Erinnerungen** (Einstellungen): Push vor Aufgaben mit Uhrzeit, Morgenübersicht, Abend-Erinnerung.
 - **Android**: „Teilen“ → Organizer legt eine Aufgabe an (Link in den Notizen); langes Drücken aufs App-Symbol: Neu / Tag planen / Heute.
@@ -102,6 +106,8 @@ Für schnelles UI-Arbeiten: `npm run dev:api` (Worker auf :8787) und parallel `n
 
 ## Versionen
 
+- **0.7** (24.11.2026): „Heute“ neu: Reihenfolge statt Uhrzeiten, Ansichten nach Dauer/Priorität, Als Nächstes + Fokus-Timer,
+  Fortschritt & Zeitbudget, Lücken-Hinweis, Kalender nur seitlich; „Tag planen“ legt nur noch die Reihenfolge fest
 - **0.6** (22.11.2026): Tag planen: Unteraufgaben unter ihrer Aufgabe, Vorschläge gruppiert (Wichtig/Kleinere/Alle anderen + Suche), Reihenfolge per Ziehen, Dauer 5 min–2 h
 - **0.5** (22.11.2026): Aufgaben mit Tag als Google Aufgaben (Liste „Organizer“, in beide Richtungen); Fix: erstmals eingeplante Aufgaben kamen nicht immer im Google Kalender an
 - **0.4** (22.11.2026): Eingabesprache mit Markierung und Vorschlägen, Aufgabennummern, geschätzte Dauer, Fristen mit Uhrzeit (+ Erinnerung)

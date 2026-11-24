@@ -1,18 +1,16 @@
 /**
- * „Tag planen“: Reste klären, Aufgaben für heute wählen (gruppiert), Reihenfolge + Dauer → Zeiten.
+ * „Tag planen“: Reste klären, Aufgaben für heute wählen (gruppiert), Reihenfolge + Dauer (ohne Uhrzeiten).
  * Unteraufgaben erscheinen immer unter ihrer Aufgabe, nicht als eigene Einträge.
  */
-import { useEffect, useMemo, useState } from 'react'
-import type { CSSProperties, ReactNode } from 'react'
+import { useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
-import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
-import { CSS } from '@dnd-kit/utilities'
-import { ChevronDown, CornerDownRight, GripVertical, Inbox, Plus, Search, Wand2, X, Zap, Flame } from 'lucide-react'
+import { ChevronDown, CornerDownRight, GripVertical, Inbox, Plus, Search, X, Zap, Flame } from 'lucide-react'
 import { useStore, eventsFor } from '../store'
 import type { List, Task } from '../lib/types'
-import { addDaysStr, hhmm, localDayOf, timeLabel } from '../lib/dates'
-import { autoPlan, busyTimes } from '../lib/autoplan'
+import { addDaysStr, localDayOf, timeLabel } from '../lib/dates'
+import { BUCKETS, bucketOf, freeMinutes, minutesText, planDay } from '../lib/dayplan'
+import { DayList } from './DayList'
 import { isBlocked } from '../lib/blocking'
 import { ancestors, childrenOf, compareTasks } from '../lib/tree'
 import { matchesSearch } from '../lib/compose'
@@ -336,165 +334,43 @@ function KidLinesExcept({ task, today }: { task: Task; today: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Schritt „Wann machst du was?“ – Reihenfolge per Ziehen, Dauer per Tipp
+// Schritt „In welcher Reihenfolge?“ – ohne Uhrzeiten
 // ---------------------------------------------------------------------------
-const DURS: [number, string][] = [
-  [5, '5 min'],
-  [15, '15 min'],
-  [30, '30 min'],
-  [60, '1 h'],
-  [120, '2 h'],
-]
-const durText = (m: number) => DURS.find(([v]) => v === m)?.[1] ?? (m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60 ? `${m % 60}` : ''}`.trim())
-
-export function TimeStep({ today }: { today: string }) {
+export function OrderStep({ today }: { today: string }) {
   const tasks = useStore((s) => s.tasks)
   const events = useStore((s) => s.events)
-  const schedule = useStore((s) => s.schedule)
-  const updateTask = useStore((s) => s.updateTask)
-  const showToast = useStore((s) => s.showToast)
-
-  const open = useMemo(
-    () =>
-      Object.values(tasks)
-        .filter((t) => t.status === 'open' && t.due_date === today && !t.start_at && !isBlocked(tasks, t))
-        // Aufgaben, deren Elternaufgabe heute ebenfalls dran ist, werden mit ihr erledigt
-        .filter((t) => !ancestors(tasks, t).some((a) => a.status === 'open' && a.due_date === today && !a.start_at))
-        .sort(byPrio),
-    [tasks, today],
-  )
-  const [order, setOrder] = useState<string[]>(() => open.map((t) => t.id))
-  const [dur, setDur] = useState<Record<string, number>>({})
-  const [until, setUntil] = useState(20 * 60)
-
-  // neue/verschwundene Aufgaben in die Reihenfolge einarbeiten
-  useEffect(() => {
-    setOrder((o) => {
-      const ids = new Set(open.map((t) => t.id))
-      const kept = o.filter((id) => ids.has(id))
-      const added = open.filter((t) => !kept.includes(t.id)).map((t) => t.id)
-      return kept.length === o.length && !added.length ? o : [...kept, ...added]
-    })
-  }, [open])
-
-  const now = new Date()
-  const from = Math.max(8 * 60, now.getHours() * 60 + now.getMinutes() + 10)
-  const minutesOf = (t: Task) => dur[t.id] ?? t.estimate ?? 30
-  const rows = order.map((id) => tasks[id]).filter((t): t is Task => !!t && open.some((o) => o.id === t.id))
-
-  const preview = useMemo(() => {
-    const busy = busyTimes(today, Object.values(tasks), eventsFor(events, today, today))
-    return autoPlan(
-      rows.map((t) => ({ id: t.id, minutes: minutesOf(t) })),
-      busy,
-      from,
-      until,
-      { sequential: true, step: 5, gap: 5 },
-    )
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows.map((r) => r.id).join(), dur, tasks, events, today, from, until])
-
-  const fitting = rows.filter((t) => preview[t.id] !== undefined)
-  const planned = Object.values(tasks)
-    .filter((t) => t.start_at && localDayOf(t.start_at) === today)
-    .sort((a, b) => a.start_at!.localeCompare(b.start_at!))
-
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }))
-  const onDragEnd = ({ active, over }: DragEndEvent) => {
-    if (!over || active.id === over.id) return
-    haptic(8)
-    setOrder((o) => arrayMove(o, o.indexOf(String(active.id)), o.indexOf(String(over.id))))
-  }
-  const setMinutes = (t: Task, m: number) => {
-    setDur((x) => ({ ...x, [t.id]: m }))
-    // als Schätzung merken – hilft beim nächsten Mal
-    if (t.estimate !== m) updateTask(t.id, { estimate: m })
-  }
-  const apply = () => {
-    for (const t of fitting) schedule(t.id, today, preview[t.id], minutesOf(t))
-    haptic(15)
-    showToast(`${fitting.length} ${fitting.length === 1 ? 'Aufgabe' : 'Aufgaben'} eingeplant`)
-  }
-
+  const end = useStore((s) => s.prefs.day?.end ?? '20:00')
+  const plan = useMemo(() => planDay(tasks, today), [tasks, today])
+  const free = freeMinutes(today, today, end, eventsFor(events, today, today))
+  if (!plan.rows.length) return <p className="muted">Für heute ist nichts offen. Geh einen Schritt zurück und nimm dir etwas vor.</p>
   return (
     <div>
-      {rows.length === 0 ? (
-        <p className="muted">Alles, was heute ansteht, hat schon eine Uhrzeit – oder wartet noch auf etwas.</p>
-      ) : (
-        <>
-          <p className="muted small" style={{ margin: '-8px 0 12px' }}>
-            Reihenfolge ziehen <GripVertical size={12} style={{ verticalAlign: -2 }} />, Dauer antippen – die Zeiten rechnen sich mit.
-          </p>
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-            <SortableContext items={rows.map((t) => t.id)} strategy={verticalListSortingStrategy}>
-              <div className="r-list">
-                {rows.map((t) => (
-                  <TimeRow key={t.id} task={t} at={preview[t.id]} minutes={minutesOf(t)} onMinutes={(m) => setMinutes(t, m)} />
-                ))}
-              </div>
-            </SortableContext>
-          </DndContext>
-          <div className="r-actions">
-            <label className="muted small">
-              Spätestens bis{' '}
-              <select value={until} onChange={(e) => setUntil(Number(e.target.value))}>
-                {[17, 18, 19, 20, 21, 22, 23].map((h) => (
-                  <option key={h} value={h * 60}>
-                    {h}:00
-                  </option>
-                ))}
-              </select>
-            </label>
-            <span style={{ flex: 1 }} />
-            <button className="btn" disabled={!fitting.length} onClick={apply}>
-              <Wand2 size={16} /> {fitting.length ? `${fitting.length} einplanen` : 'Keine Lücke frei'}
-            </button>
-          </div>
-        </>
-      )}
-      {planned.length > 0 && (
-        <>
-          <h3 className="r-sub" style={{ marginTop: 18 }}>
-            Schon eingeplant
-          </h3>
-          <div className="r-timeline">
-            {planned.map((t) => (
-              <div key={t.id} className="r-tl-item">
-                <span>{timeLabel(t.start_at!)}</span>
-                <b>{t.title}</b>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
+      <p className="muted small" style={{ margin: '-8px 0 12px' }}>
+        Ziehen <GripVertical size={12} style={{ verticalAlign: -2 }} /> ändert die Reihenfolge, die Dauer antippen ordnet die Aufgabe ein: Mini (5 min), zwischendurch (15 min) oder länger.
+      </p>
+      <DayList rows={plan.rows} day={today} mode="order" compact />
+      <DayStats rows={plan.rows} minutes={plan.minutes} unknown={plan.unknown} free={free} end={end} />
     </div>
   )
 }
 
-function TimeRow({ task, at, minutes, onMinutes }: { task: Task; at: number | undefined; minutes: number; onMinutes: (m: number) => void }) {
-  const tasks = useStore((s) => s.tasks)
-  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id: task.id })
-  const style: CSSProperties = { transform: CSS.Translate.toString(transform), transition, zIndex: isDragging ? 5 : undefined, position: 'relative' }
-  const kids = openKids(tasks, task.id).length
-  const custom = !DURS.some(([v]) => v === minutes)
+/** Überblick: wie viele Mini-/Zwischendurch-/längere Aufgaben, wie viel Zeit */
+export function DayStats({ rows, minutes, unknown, free, end }: { rows: Task[]; minutes: number; unknown: number; free: number; end: string }) {
+  const count = (b: string) => rows.filter((t) => bucketOf(t) === b).length
   return (
-    <div ref={setNodeRef} style={style} className={`r-row compact time-row ${isDragging ? 'dragging' : ''}`}>
-      <button ref={setActivatorNodeRef} className="r-grip" aria-label={`„${task.title}“ verschieben`} {...attributes} {...listeners}>
-        <GripVertical size={16} />
-      </button>
-      <span className={`r-slot ${at === undefined ? 'none' : ''}`}>{at === undefined ? 'passt nicht' : `${hhmm(at)}–${hhmm(at + minutes)}`}</span>
-      <div className="r-row-main">
-        <span className="r-row-title">{task.title}</span>
-        {kids > 0 && <span className="muted small">mit {kids} Unteraufgabe{kids === 1 ? '' : 'n'}</span>}
-      </div>
-      <div className="r-durs" role="group" aria-label="Dauer">
-        {custom && <button className="r-dur on">{durText(minutes)}</button>}
-        {DURS.map(([m, label]) => (
-          <button key={m} className={`r-dur ${minutes === m ? 'on' : ''}`} onClick={() => onMinutes(m)}>
-            {label}
-          </button>
+    <div className="day-stats">
+      <div className="day-stat-chips">
+        {BUCKETS.filter((b) => count(b.id)).map((b) => (
+          <span key={b.id} className={`dur-chip static ${b.id}`}>
+            {count(b.id)} {b.label}
+          </span>
         ))}
       </div>
+      <span className="muted small">
+        {minutes > 0 ? `zusammen ~${minutesText(minutes)}` : 'noch keine Dauer geschätzt'}
+        {unknown > 0 && minutes > 0 && ` (+${unknown} ohne Dauer)`} · bis {end} frei: {minutesText(free)}
+        {minutes > free && <b className="budget-warn"> – das wird knapp</b>}
+      </span>
     </div>
   )
 }

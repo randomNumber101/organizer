@@ -17,6 +17,7 @@ import Ritual from './components/Ritual'
 import CommandPalette from './components/CommandPalette'
 import TemplatePicker from './components/TemplatePicker'
 import { FilterPanel } from './components/FilterBar'
+import { FocusWatcher } from './components/FocusCard'
 import { todayStr } from './lib/dates'
 
 const ORDER: ViewName[] = ['board', 'today', 'calendar']
@@ -92,6 +93,7 @@ export default function App() {
           <TemplatePicker />
           <FilterPanel />
           <CommandPalette />
+          <FocusWatcher />
           <Toast />
         </div>
       )}

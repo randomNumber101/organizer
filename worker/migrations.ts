@@ -177,4 +177,12 @@ export const MIGRATIONS: Migration[] = [
       `ALTER TABLE google_account ADD COLUMN tasks_problem TEXT`,
     ],
   },
+  {
+    id: 6,
+    name: 'day_order',
+    statements: [
+      // Reihenfolge innerhalb des Tages, an dem die Aufgabe dran ist („Heute“, „Tag planen“)
+      `ALTER TABLE tasks ADD COLUMN day_order REAL`,
+    ],
+  },
 ]

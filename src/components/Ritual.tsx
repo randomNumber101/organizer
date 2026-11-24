@@ -1,20 +1,21 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ArrowLeft, ArrowRight, CalendarClock, Check as CheckIcon, Moon, Plus, Sparkles, Sun, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Check as CheckIcon, Moon, Plus, Sparkles, Sun, X } from 'lucide-react'
 import { useStore, eventsFor, type RitualKind } from '../store'
 import type { Task } from '../lib/types'
-import { addDaysStr, localDayOf, longDayLabel, minutesOfDay, timeLabel, todayStr } from '../lib/dates'
+import { addDaysStr, localDayOf, longDayLabel, timeLabel, todayStr } from '../lib/dates'
 import { haptic } from '../lib/haptics'
 import { TaskMeta } from './TaskCard'
 import CheckBox from './Check'
 import SmartField from './SmartField'
-import { PickStep, TimeStep, treeOrder } from './RitualPlan'
+import { DayStats, OrderStep, PickStep, treeOrder } from './RitualPlan'
+import { freeMinutes, planDay } from '../lib/dayplan'
 import { composeTask } from '../lib/compose'
 import { LIST_COLORS } from '../lib/types'
 
-type Step = 'leftover' | 'pick' | 'time' | 'summary' | 'achieved' | 'open' | 'tomorrow'
+type Step = 'leftover' | 'pick' | 'order' | 'summary' | 'achieved' | 'open' | 'tomorrow'
 
-const PLAN_STEPS: Step[] = ['leftover', 'pick', 'time', 'summary']
+const PLAN_STEPS: Step[] = ['leftover', 'pick', 'order', 'summary']
 const REVIEW_STEPS: Step[] = ['achieved', 'open', 'tomorrow']
 
 const byPrio = (a: Task, b: Task) => a.priority - b.priority || (a.deadline ?? '9').localeCompare(b.deadline ?? '9') || a.sort - b.sort
@@ -93,7 +94,7 @@ function Flow({ kind }: { kind: RitualKind }) {
   const titles: Record<Step, [string, string]> = {
     leftover: ['Was ist liegen geblieben?', 'Entscheide kurz für jede Aufgabe: heute, morgen, später – oder schon erledigt.'],
     pick: ['Was steht heute an?', 'Nimm dir lieber weniger vor. Antippen holt eine Aufgabe auf heute – zuerst das Wichtige, dann Kleinkram.'],
-    time: ['Wann machst du was?', 'Bring die Aufgaben in deine Reihenfolge und schätze die Dauer – sie werden nacheinander in die freien Lücken gelegt.'],
+    order: ['In welcher Reihenfolge?', 'Leg fest, was du zuerst angehst – ohne Uhrzeiten. „Heute“ zeigt dir dann immer, was als Nächstes dran ist.'],
     summary: ['Dein Tag steht', ''],
     achieved: ['Das hast du heute geschafft', ''],
     open: ['Was ist noch offen?', 'Schieb es bewusst weiter, statt es einfach liegen zu lassen.'],
@@ -136,7 +137,7 @@ function Flow({ kind }: { kind: RitualKind }) {
                 <RitualQuickAdd day={today} />
               </PickStep>
             )}
-            {step === 'time' && <TimeStep today={today} />}
+            {step === 'order' && <OrderStep today={today} />}
             {step === 'summary' && <SummaryStep today={today} />}
             {step === 'achieved' && <AchievedStep today={today} />}
             {step === 'open' && <OpenStep today={today} />}
@@ -252,26 +253,31 @@ function RitualQuickAdd({ day }: { day: string }) {
 function SummaryStep({ today }: { today: string }) {
   const tasks = useStore((s) => s.tasks)
   const events = useStore((s) => s.events)
-  const todays = Object.values(tasks).filter((t) => t.status === 'open' && t.due_date === today)
-  const planned = todays.filter((t) => t.start_at).sort((a, b) => a.start_at!.localeCompare(b.start_at!))
-  const mins = planned.reduce((n, t) => n + (t.end_at ? (Date.parse(t.end_at) - Date.parse(t.start_at!)) / 60000 : 0), 0)
-  const evs = eventsFor(events, today, today).filter((e) => !e.allDay && localDayOf(e.start) === today)
-  const nowMin = new Date().getHours() * 60 + new Date().getMinutes()
-  const next = planned.find((t) => minutesOfDay(t.start_at!) >= nowMin)
+  const end = useStore((s) => s.prefs.day?.end ?? '20:00')
+  const plan = useMemo(() => planDay(tasks, today), [tasks, today])
+  const dayEvents = eventsFor(events, today, today)
+  const evs = dayEvents.filter((e) => !e.allDay && localDayOf(e.start) === today)
+  const free = freeMinutes(today, today, end, dayEvents)
+  const first = plan.rows.slice(0, 3)
   return (
     <div className="r-summary">
       <div className="r-stats">
-        <Stat n={todays.length} label={todays.length === 1 ? 'Aufgabe' : 'Aufgaben'} />
-        <Stat n={planned.length} label="mit Uhrzeit" />
+        <Stat n={plan.rows.length} label={plan.rows.length === 1 ? 'Aufgabe' : 'Aufgaben'} />
+        {plan.minutes > 0 && <Stat n={Math.round((plan.minutes / 60) * 10) / 10} label="Std. geschätzt" />}
         <Stat n={evs.length} label={evs.length === 1 ? 'Termin' : 'Termine'} />
-        {mins > 0 && <Stat n={Math.round((mins / 60) * 10) / 10} label="Std. verplant" />}
       </div>
-      {next && (
-        <p className="r-next">
-          <CalendarClock size={16} /> Als Nächstes um {timeLabel(next.start_at!)}: <b>{next.title}</b>
-        </p>
+      {first.length > 0 && (
+        <div className="r-first">
+          <span className="r-section-title">So startest du</span>
+          <ol>
+            {first.map((t) => (
+              <li key={t.id}>{t.title}</li>
+            ))}
+          </ol>
+        </div>
       )}
-      {todays.length > 7 && <p className="muted">Das ist eine Menge. Wenn du magst, geh einen Schritt zurück und schieb etwas auf morgen.</p>}
+      {plan.rows.length > 0 && <DayStats rows={plan.rows} minutes={plan.minutes} unknown={plan.unknown} free={free} end={end} />}
+      {plan.rows.length > 7 && <p className="muted">Das ist eine Menge. Wenn du magst, geh einen Schritt zurück und schieb etwas auf morgen.</p>}
     </div>
   )
 }
@@ -424,7 +430,7 @@ export function RitualBanner() {
       {kind === 'plan' ? <Sun size={18} /> : <Moon size={18} />}
       <button className="ritual-banner-main" onClick={() => openRitual(kind)}>
         <b>{kind === 'plan' ? 'Tag planen' : 'Tag abschließen'}</b>
-        <span>{kind === 'plan' ? '2 Minuten: Reste klären, Fokus wählen, Zeiten setzen' : 'Kurz zurückblicken und Offenes bewusst verschieben'}</span>
+        <span>{kind === 'plan' ? '2 Minuten: Reste klären, Aufgaben wählen, Reihenfolge festlegen' : 'Kurz zurückblicken und Offenes bewusst verschieben'}</span>
       </button>
       <button className="icon-btn sm" aria-label="Ausblenden" onClick={() => setHidden(`${kind}:${today}`)}>
         <X size={15} />

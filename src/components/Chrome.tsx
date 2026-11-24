@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { FocusPill } from './FocusCard'
 import { AnimatePresence, motion } from 'motion/react'
 import { CalendarDays, CloudOff, Columns3, Command, RefreshCw, Search, Settings, Sun, X } from 'lucide-react'
 import { useStore } from '../store'
@@ -36,6 +37,7 @@ export function TopBar() {
         <Segmented group="views" value={view} onChange={(v) => setView(v as ViewName)} options={VIEWS} />
       </div>
       <span className="grow" />
+      <FocusPill />
       <SearchBox open={searchOpen} setOpen={setSearchOpen} />
       <SyncStatus connected={connected} />
       <button className="icon-btn" aria-label="Befehle (Strg+K)" title="Befehle  (Strg+K)" onClick={() => useStore.getState().setPalette(true)}>

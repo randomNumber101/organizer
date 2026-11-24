@@ -18,9 +18,11 @@ interface MetaProps {
   showList?: boolean
   /** Fortschritt der Unteraufgaben zeigen (aus, wenn sie ohnehin darunter stehen) */
   showSubs?: boolean
+  /** geschätzte Dauer zeigen (aus, wenn es daneben eine eigene Auswahl gibt) */
+  showEstimate?: boolean
 }
 
-export function TaskMeta({ task, showDate = true, showList = true, showSubs = true }: MetaProps) {
+export function TaskMeta({ task, showDate = true, showList = true, showSubs = true, showEstimate = true }: MetaProps) {
   const tasks = useStore((s) => s.tasks)
   const list = useStore((s) => (task.list_id ? s.lists[task.list_id] : undefined))
   const expanded = useStore((s) => s.expanded[task.id] ?? s.showSubtasks)
@@ -49,7 +51,7 @@ export function TaskMeta({ task, showDate = true, showList = true, showSubs = tr
         </span>
       )}
       {task.deadline && task.status === 'open' && <DeadlineChip deadline={task.deadline} today={today} />}
-      {task.estimate && !task.start_at && task.status === 'open' && (
+      {showEstimate && task.estimate && !task.start_at && task.status === 'open' && (
         <span className="chip" title="Geschätzte Dauer">
           <Timer />
           {durationText(task.estimate)}
@@ -121,7 +123,7 @@ export function DeadlineChip({ deadline, today = todayStr() }: { deadline: strin
 const SUB_LIMIT = 6
 
 /** Unteraufgaben direkt auf der Karte – offene zuerst, abhakbar, antippen öffnet sie */
-function SubList({ task }: { task: Task }) {
+export function SubList({ task }: { task: Task }) {
   const tasks = useStore((s) => s.tasks)
   const toggleDone = useStore((s) => s.toggleDone)
   const select = useStore((s) => s.select)

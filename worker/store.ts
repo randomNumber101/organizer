@@ -71,7 +71,7 @@ const PULL_EVERY = 10 * MIN
 const TASK_PATH = /^\/api\/tasks\/([0-9a-f-]{36})$/i
 const LIST_PATH = /^\/api\/lists\/([0-9a-f-]{36})$/i
 const TEMPLATE_PATH = /^\/api\/templates\/([0-9a-f-]{36})$/i
-const PREF_PATH = /^\/api\/prefs\/(views|push|ritual|board)$/
+const PREF_PATH = /^\/api\/prefs\/(views|push|ritual|board|day)$/
 
 /** Nach jeder Änderung: muss der Google-Termin der Aufgabe angepasst werden? */
 // Achtung: in SQLite sehen Ausdrücke in SET die ALTEN Spaltenwerte. Gut für Statusänderungen/Löschen,
@@ -465,13 +465,14 @@ export class OrganizerStore extends DurableObject<Env> {
       t.deadline,
       JSON.stringify(t.blocked_by ?? []),
       t.estimate ?? null,
+      t.day_order ?? null,
     ]
     if (insert) {
       return this.sql
         .exec<TaskRow>(
           `INSERT INTO tasks (list_id, parent_id, title, notes, status, priority, horizon, tags, due_date, start_at, end_at,
-             timezone, rrule, completed_at, sort, origin_event_id, deadline, blocked_by, estimate, num, id, created_at, updated_at, seq, gcal_event_id, gcal_etag, gcal_dirty, gtask_dirty)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+             timezone, rrule, completed_at, sort, origin_event_id, deadline, blocked_by, estimate, day_order, num, id, created_at, updated_at, seq, gcal_event_id, gcal_etag, gcal_dirty, gtask_dirty)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
           ...values,
           this.nextNum(),
           id,
@@ -491,7 +492,7 @@ export class OrganizerStore extends DurableObject<Env> {
       .exec<TaskRow>(
         `UPDATE tasks SET list_id = ?, parent_id = ?, title = ?, notes = ?, status = ?, priority = ?, horizon = ?, tags = ?,
            due_date = ?, start_at = ?, end_at = ?, timezone = ?, rrule = ?, completed_at = ?, sort = ?, origin_event_id = ?,
-           deadline = ?, blocked_by = ?, estimate = ?,
+           deadline = ?, blocked_by = ?, estimate = ?, day_order = ?,
            updated_at = ?, seq = ?,
            gcal_dirty = CASE WHEN ? = 1 AND (? = 1 OR gcal_event_id IS NOT NULL) THEN 1 ELSE gcal_dirty END,
            gtask_dirty = CASE WHEN ? = 1 AND (? = 1 OR gtask_id IS NOT NULL) THEN 1 ELSE gtask_dirty END
@@ -591,7 +592,7 @@ export class OrganizerStore extends DurableObject<Env> {
           changed.push(
             this.sql
               .exec<TaskRow>(
-                `UPDATE tasks SET due_date = ?, start_at = ?, end_at = ?, rollover_count = 0, status = 'open', completed_at = NULL,
+                `UPDATE tasks SET due_date = ?, start_at = ?, end_at = ?, rollover_count = 0, status = 'open', completed_at = NULL, day_order = NULL,
                    updated_at = ?, seq = ?, ${MARK_DIRTY} WHERE id = ? RETURNING *`,
                 due,
                 start,
@@ -705,7 +706,7 @@ export class OrganizerStore extends DurableObject<Env> {
         .exec(
           `UPDATE tasks SET
              rollover_count = rollover_count + CAST(julianday(?1) - julianday(due_date) AS INTEGER),
-             due_date = ?1, updated_at = ?2, seq = ?3, gtask_dirty = 1
+             due_date = ?1, day_order = NULL, updated_at = ?2, seq = ?3, gtask_dirty = 1
            WHERE deleted_at IS NULL AND status = 'open' AND start_at IS NULL AND due_date < ?1
            RETURNING id`,
           today,
@@ -1842,9 +1843,11 @@ export class OrganizerStore extends DurableObject<Env> {
         if (title !== t.title || notes !== t.notes || due !== t.due_date) {
           this.sql.exec(
             `UPDATE tasks SET title = ?, notes = ?, due_date = ?, rollover_count = CASE WHEN ? IS NOT due_date THEN 0 ELSE rollover_count END,
+               day_order = CASE WHEN ? IS NOT due_date THEN NULL ELSE day_order END,
                gtask_updated = ?, updated_at = ?, seq = ? WHERE id = ?`,
             title,
             notes,
+            due,
             due,
             due,
             it.updated,
@@ -1910,6 +1913,7 @@ type TaskFields = {
   deadline: string | null
   blocked_by: string[]
   estimate: number | null
+  day_order: number | null
 }
 
 const DEFAULT_TASK = (): Omit<TaskFields, 'title'> => ({
@@ -1931,6 +1935,7 @@ const DEFAULT_TASK = (): Omit<TaskFields, 'title'> => ({
   deadline: null,
   blocked_by: [],
   estimate: null,
+  day_order: null,
 })
 
 // ---------------------------------------------------------------------------

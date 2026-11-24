@@ -102,7 +102,7 @@ function PaletteBody() {
     const s = st()
     const actions: Item[] = [
       { id: 'a:new', group: 'Aktionen', label: 'Neue Aufgabe', icon: <Plus />, keywords: 'anlegen erstellen hinzufügen', run: () => s.openQuickAdd(s.view === 'today' ? { due_date: s.focusDay } : {}) },
-      { id: 'a:plan', group: 'Aktionen', label: 'Tag planen', sub: 'Reste klären, Fokus wählen, Zeiten setzen', icon: <Sun />, keywords: 'morgen ritual', run: () => s.openRitual('plan') },
+      { id: 'a:plan', group: 'Aktionen', label: 'Tag planen', sub: 'Reste klären, Aufgaben wählen, Reihenfolge festlegen', icon: <Sun />, keywords: 'morgen ritual', run: () => s.openRitual('plan') },
       { id: 'a:review', group: 'Aktionen', label: 'Tag abschließen', sub: 'Rückblick und Offenes verschieben', icon: <Moon />, keywords: 'abend ritual review', run: () => s.openRitual('review') },
       { id: 'a:triage', group: 'Aktionen', label: 'Unsortiert einsortieren', icon: <Inbox />, keywords: 'triage inbox', run: () => s.setTriage(true) },
       { id: 'a:tpl', group: 'Aktionen', label: 'Aus Vorlage anlegen …', icon: <LayoutTemplate />, keywords: 'template', run: () => s.openTemplatePicker({}) },

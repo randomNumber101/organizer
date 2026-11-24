@@ -41,6 +41,7 @@ export type TaskRow = {
   gtask_id: string | null
   gtask_updated: string | null
   gtask_dirty: number
+  day_order: number | null
   created_at: string
   updated_at: string
   deleted_at: string | null
@@ -130,6 +131,7 @@ export type TaskInput = Partial<{
   deadline: string | null
   blocked_by: string[]
   estimate: number | null
+  day_order: number | null
 }>
 
 const bad = (msg: string): never => {
@@ -170,6 +172,7 @@ export function cleanTaskInput(body: unknown): TaskInput {
   }
   if ('origin_event_id' in b) out.origin_event_id = b.origin_event_id === null ? null : typeof b.origin_event_id === 'string' && b.origin_event_id.length <= 1100 ? b.origin_event_id : bad('Ungültiger Termin-Verweis')
   if ('sort' in b) out.sort = typeof b.sort === 'number' && Number.isFinite(b.sort) ? b.sort : bad('Ungültige Sortierung')
+  if ('day_order' in b) out.day_order = b.day_order === null ? null : typeof b.day_order === 'number' && Number.isFinite(b.day_order) ? b.day_order : bad('Ungültige Reihenfolge')
   return out
 }
 

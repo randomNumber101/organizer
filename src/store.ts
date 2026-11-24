@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { ApiError, api, connectLive, setUnauthorizedHandler } from './lib/api'
 import type { SyncResult } from './lib/api'
-import type { BoardMode, CalendarEvent, GoogleStatus, List, Prefs, SavedView, Task, TaskFilter, TaskPatch, Template, TemplateNode, ViewName } from './lib/types'
+import type { BoardMode, CalendarEvent, GoogleStatus, List, Prefs, SavedView, Task, TaskFilter, TaskPatch, Template, TemplateNode, TodayMode, ViewName } from './lib/types'
 import { addDaysStr, deviceTimeZone, isoFromDayMinutes, minutesBetween, shortDate, todayStr } from './lib/dates'
 import { childrenOf, compareTasks, descendantIds } from './lib/tree'
 import { load, save } from './lib/storage'
@@ -22,6 +22,14 @@ export interface NewTask extends TaskPatch {
 }
 
 export type RitualKind = 'plan' | 'review'
+
+/** Fokus-Timer: läuft (endsAt) oder pausiert (left = verbleibende ms) */
+export interface Focus {
+  id: string
+  minutes: number
+  endsAt: number | null
+  left: number | null
+}
 
 interface State {
   authed: boolean | null
@@ -59,6 +67,9 @@ interface State {
   showSubtasks: boolean
   showNums: boolean
   dragging: boolean
+  todayMode: TodayMode
+  calendarPanel: boolean
+  focus: Focus | null
 
   google: GoogleStatus | null
   events: Record<string, CalendarEvent[]>
@@ -93,6 +104,15 @@ interface State {
   toggleExpanded: (id: string) => void
   setShowSubtasks: (v: boolean) => void
   setShowNums: (v: boolean) => void
+  setTodayMode: (m: TodayMode) => void
+  setCalendarPanel: (open: boolean) => void
+  startFocus: (id: string, minutes: number) => void
+  pauseFocus: () => void
+  resumeFocus: () => void
+  extendFocus: (minutes: number) => void
+  stopFocus: () => void
+  /** Tagesreihenfolge setzen: ids in gewünschter Reihenfolge (moved = die gerade verschobene) */
+  setDayOrder: (ids: string[], moved?: string) => void
   setDragging: (d: boolean) => void
 
   createTask: (input: NewTask) => Task
@@ -385,6 +405,9 @@ export const useStore = create<State>()((set, get) => {
     expanded: {},
     showSubtasks: load<boolean>('showSubtasks', true),
     showNums: load<boolean>('showNums', true),
+    todayMode: load<TodayMode>('todayMode', 'order'),
+    calendarPanel: load<boolean>('calendarPanel', false),
+    focus: load<Focus | null>('focus', null),
     dragging: false,
 
     google: null,
@@ -507,6 +530,12 @@ export const useStore = create<State>()((set, get) => {
       const r = get().prefs.ritual ?? {}
       get().setPref('ritual', { ...r, [kind === 'plan' ? 'planned' : 'reviewed']: todayStr() })
       set({ ritual: null })
+      // nach dem Planen direkt in „Heute“, in der festgelegten Reihenfolge
+      if (kind === 'plan') {
+        get().setTodayMode('order')
+        get().setFocusDay(todayStr())
+        get().setView('today')
+      }
     },
     openTemplatePicker: (defaults) => set({ templatePicker: defaults === null ? null : { defaults: defaults ?? {} }, paletteOpen: false }),
     setSearch: (search) => set({ search }),
@@ -552,6 +581,68 @@ export const useStore = create<State>()((set, get) => {
       save('showNums', showNums)
       set({ showNums })
     },
+    setTodayMode: (todayMode) => {
+      save('todayMode', todayMode)
+      set({ todayMode })
+    },
+    setCalendarPanel: (calendarPanel) => {
+      save('calendarPanel', calendarPanel)
+      set({ calendarPanel })
+    },
+    startFocus: (id, minutes) => {
+      const focus: Focus = { id, minutes, endsAt: Date.now() + minutes * 60_000, left: null }
+      save('focus', focus)
+      set({ focus })
+    },
+    pauseFocus: () => {
+      const f = get().focus
+      if (!f || f.endsAt === null) return
+      const focus = { ...f, endsAt: null, left: Math.max(0, f.endsAt - Date.now()) }
+      save('focus', focus)
+      set({ focus })
+    },
+    resumeFocus: () => {
+      const f = get().focus
+      if (!f || f.left === null) return
+      const focus = { ...f, endsAt: Date.now() + f.left, left: null }
+      save('focus', focus)
+      set({ focus })
+    },
+    extendFocus: (minutes) => {
+      const f = get().focus
+      if (!f) return
+      const base = f.endsAt !== null ? Math.max(f.endsAt, Date.now()) : null
+      const focus = base !== null ? { ...f, minutes: f.minutes + minutes, endsAt: base + minutes * 60_000 } : { ...f, minutes: f.minutes + minutes, left: (f.left ?? 0) + minutes * 60_000 }
+      save('focus', focus)
+      set({ focus })
+    },
+    stopFocus: () => {
+      save('focus', null)
+      set({ focus: null })
+    },
+    setDayOrder: (ids, moved) => {
+      const tasks = get().tasks
+      // Wenn alle anderen schon sauber nummeriert sind, reicht ein Wert zwischen den Nachbarn
+      if (moved) {
+        const i = ids.indexOf(moved)
+        const others = ids.filter((id) => id !== moved).map((id) => tasks[id]?.day_order ?? null)
+        const sorted = others.every((v, k) => v !== null && (k === 0 || v > others[k - 1]!))
+        if (i >= 0 && sorted) {
+          const prev = i > 0 ? tasks[ids[i - 1]].day_order! : null
+          const next = i < ids.length - 1 ? tasks[ids[i + 1]].day_order! : null
+          const val = prev === null ? (next ?? 1024) - 1024 : next === null ? prev + 1024 : (prev + next) / 2
+          if ((prev === null || val > prev) && (next === null || val < next) && Math.abs((next ?? val + 1) - (prev ?? val - 1)) > 1e-6) {
+            enqueue({ kind: 'updateTask', id: moved, patch: { day_order: val } })
+            return
+          }
+        }
+      }
+      // sonst neu durchnummerieren – Abstände von 1024, damit spätere Verschiebungen meist nur eine Aufgabe ändern
+      ids.forEach((id, i) => {
+        const want = (i + 1) * 1024
+        if (tasks[id] && tasks[id].day_order !== want) enqueue({ kind: 'updateTask', id, patch: { day_order: want } })
+      })
+    },
     setDragging: (dragging) => set({ dragging }),
 
     showToast: (text, kind = 'info', undo) => {
@@ -582,6 +673,7 @@ export const useStore = create<State>()((set, get) => {
         deadline: null,
         blocked_by: [],
         estimate: null,
+        day_order: null,
         ...input,
       }
       enqueue({ kind: 'createTask', body })
@@ -592,6 +684,8 @@ export const useStore = create<State>()((set, get) => {
       const prev = get().tasks[id]
       if (!prev) return
       const fullPatch: TaskPatch = { ...patch }
+      // neuer Tag → neu einsortieren (landet am Ende der Tagesreihenfolge)
+      if ('due_date' in patch && patch.due_date !== prev.due_date && !('day_order' in patch) && prev.day_order !== null) fullPatch.day_order = null
       if (patch.start_at && !prev.timezone && !patch.timezone) fullPatch.timezone = deviceTimeZone()
       if (patch.rrule && !prev.due_date && !patch.due_date) fullPatch.due_date = todayStr()
       enqueue({ kind: 'updateTask', id, patch: fullPatch })
@@ -610,6 +704,7 @@ export const useStore = create<State>()((set, get) => {
       const ids = [id, ...desc.filter((d) => tasks[d]?.status === 'open')]
       const prev = [task, ...desc.map((d) => tasks[d]).filter(Boolean)]
       enqueue({ kind: 'setStatus', ids, status: 'done', today })
+      if (get().focus?.id === id) get().stopFocus()
 
       const after = get().tasks[id]
       const advanced = !!task.rrule && after?.status === 'open'

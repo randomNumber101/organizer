@@ -76,6 +76,7 @@ export function newTaskFrom(body: NewTaskBody, ts: string): Task {
     num: null,
     estimate: null,
     gtask_id: null,
+    day_order: null,
     created_at: ts,
     updated_at: ts,
     ...body,
